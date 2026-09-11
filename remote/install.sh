@@ -141,7 +141,7 @@ cleanup() {
 trap cleanup EXIT
 
 case "$GROK_VERSION" in
-  0.30.0|0.36.0) ;;
+  0.30.0|0.36.0|0.47.0) ;;
   *) fail_install "UNSUPPORTED_VERSION" "This exact Grok Bot version is unsupported" ;;
 esac
 

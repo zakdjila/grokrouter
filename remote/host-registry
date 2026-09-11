@@ -30,8 +30,8 @@ BUNDLED_REGISTRY_PATH="$INSTALL_ROOT/compatibility/${GROK_VERSION}-hosts.json"
 BUNDLED_SIGNATURE_PATH="$INSTALL_ROOT/compatibility/${GROK_VERSION}-hosts.json.sig"
 PUBLIC_KEY="$INSTALL_ROOT/compatibility/registry-public-key.pem"
 VERIFIER="$INSTALL_ROOT/bin/verify-host-registry.mjs"
-OFFICIAL_REGISTRY_URL="https://raw.githubusercontent.com/promptadvisers/grokrouter/main/compatibility/${GROK_VERSION}-hosts.json"
-OFFICIAL_SIGNATURE_URL="https://raw.githubusercontent.com/promptadvisers/grokrouter/main/compatibility/${GROK_VERSION}-hosts.json.sig"
+OFFICIAL_REGISTRY_URL="https://raw.githubusercontent.com/zakdjila/grokrouter/main/compatibility/${GROK_VERSION}-hosts.json"
+OFFICIAL_SIGNATURE_URL="https://raw.githubusercontent.com/zakdjila/grokrouter/main/compatibility/${GROK_VERSION}-hosts.json.sig"
 
 verify_registry() {
   node "$VERIFIER" "$1" "$2" "$PUBLIC_KEY" "$GROK_VERSION" >/dev/null

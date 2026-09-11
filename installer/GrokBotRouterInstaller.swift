@@ -3,7 +3,7 @@ import CryptoKit
 import Foundation
 import Vision
 
-private let supportedGrokVersions = ["0.30.0", "0.36.0"]
+private let supportedGrokVersions = ["0.30.0", "0.36.0", "0.47.0"]
 private let supportedGrokVersion = supportedGrokVersions.joined(separator: ", ")
 private var detectedGrokVersion = "0.30.0"
 private let grokBundleIdentifier = "com.anysphere.sand"

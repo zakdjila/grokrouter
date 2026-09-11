@@ -400,7 +400,7 @@ def is_allowed_stock(
 def dry_run_patch(source: str, manifest: dict[str, Any]) -> None:
     """Apply the transformation to a temporary copy and syntax-check it."""
     validate_anchors(source, manifest)
-    patched = patch_text(source)
+    patched = patch_text(source, manifest.get("groupContextVariant", "0.36"))
     with tempfile.NamedTemporaryFile("w", suffix=".cjs", delete=False) as temporary:
         temporary.write(patched)
         temporary_path = Path(temporary.name)
@@ -572,7 +572,7 @@ def validate_anchors(source: str, manifest: dict[str, Any]) -> None:
             raise PatchError(f"Host anchor count for {anchor!r} was {count}; expected 1")
 
 
-def patch_text(source: str) -> str:
+def patch_text(source: str, group_variant: str = "0.36") -> str:
     if MARKER in source:
         return source
     if LEGACY_MARKER.search(source):
@@ -589,9 +589,11 @@ def patch_text(source: str) -> str:
     if executor_count != 1:
         raise PatchError(f"Executor anchor count was {executor_count}; expected 1")
 
+    # Grok Bot 0.30.0/0.36.0 read the mock response from the environment;
+    # 0.47.0 reads it from the host options. Either form marks the same seam.
     session_pattern = re.compile(
         r"(createSession\(onRequestId, sessionOptions\) \{\n\s+)"
-        r"(const mockResponse = process\.env\.SAND_AGENT_MOCK_RESPONSE;)"
+        r"(const mockResponse = (?:process\.env\.SAND_AGENT_MOCK_RESPONSE|options2\.agentMockResponse);)"
     )
     source, session_count = session_pattern.subn(
         lambda match: f"{match.group(1)}{SESSION_CODE.lstrip()}\n\n      {match.group(2)}",
@@ -625,6 +627,25 @@ def patch_text(source: str) -> str:
     group_anchor = "const memberResult = await runner.run(promptForAttempt, {"
     if source.count(group_anchor) != 1:
         raise PatchError("Group member dispatch anchor must occur exactly once")
+    if group_variant == "0.47":
+        # Grok Bot 0.47.0 dispatches group members with `room`, `memberSession`
+        # and `args` in scope instead of `roomSession`/`request3`. Resolve the
+        # same context defensively so a missing field degrades to "no channel
+        # control" rather than a ReferenceError inside the host.
+        source = source.replace(group_anchor, group_anchor + "\n" + """
+                  grokBotRouterGroupContext: (() => {
+                    try {
+                      const entries = room?.db?.getTranscriptEntries?.() ?? memberSession?.db?.getTranscriptEntries?.() ?? [];
+                      return {
+                        roomId: String(room?.id ?? ""),
+                        memberId: String(memberSession?.id ?? ""),
+                        memberName: memberSession?.profile?.name ?? memberSession?.agent?.name ?? memberSession?.name ?? "",
+                        message: [...entries].reverse().find((entry) => entry?.kind === "message" && entry?.role === "user")
+                      };
+                    } catch { return null; }
+                  })(),
+""", 1)
+        return finish_patch(source)
     source = source.replace(group_anchor, group_anchor + "\n" + """
                   grokBotRouterGroupContext: {
                     roomId: roomSession.id,
@@ -634,7 +655,10 @@ def patch_text(source: str) -> str:
                       .reverse().find((entry) => entry.kind === "message" && entry.role === "user")
                   },
 """, 1)
+    return finish_patch(source)
 
+
+def finish_patch(source: str) -> str:
     memory_pattern = re.compile(r"(const extraction = await extractMemories\(\{\n\s+executor: )session\.getExecutor\(\)")
     source, memory_count = memory_pattern.subn(
         lambda match: match.group(1) + 'session.getExecutor({ grokBotRouterTextTask: "memory-extraction" })', source
@@ -693,7 +717,7 @@ def matches_adapter(host: Path, stock: Path, manifest: dict[str, Any], previous:
             if host.read_bytes() == module.patch_text(original).encode("utf-8"):
                 return True
         else:
-            expected = patch_text(original)
+            expected = patch_text(original, manifest.get("groupContextVariant", "0.36"))
         return host.read_bytes() == expected.encode("utf-8")
     except Exception:
         return False
@@ -750,7 +774,7 @@ def install(
     trust = host_trust(stock, manifest, registry) or ("development-override" if allow_unknown else None)
     source = stock.read_text()
     validate_anchors(source, manifest)
-    patched = patch_text(source)
+    patched = patch_text(source, manifest.get("groupContextVariant", "0.36"))
     if MARKER not in patched:
         raise PatchError("Patched host is missing the router marker")
     if dry_run:

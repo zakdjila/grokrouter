@@ -65,6 +65,18 @@ async function runMemoryExtraction(session) {
 """
 
 
+# Grok Bot 0.47.0 reads the mock response from host options and dispatches
+# group members with `room`/`memberSession` in scope.
+STOCK_SOURCE_047 = STOCK_SOURCE.replace(
+    "const mockResponse = process.env.SAND_AGENT_MOCK_RESPONSE;",
+    "const mockResponse = options2.agentMockResponse;",
+).replace(
+    "async function runGroup(runner, roomSession, request3, promptForAttempt) {",
+    "async function runGroup(runner, room, memberSession, promptForAttempt) {",
+)
+assert STOCK_SOURCE_047 != STOCK_SOURCE
+
+
 class RouterPatchTests(unittest.TestCase):
     def test_released_stock_hashes_keep_their_verified_byte_counts(self):
         manifest = router_patch.load_manifest(PROJECT_ROOT / "patch" / "manifests" / "0.30.0.json")
@@ -165,6 +177,51 @@ const runner = {run: async (_, options) => runInference({resolveBoxId: () => 'bo
 """
         result = subprocess.run(['node','-e',script],capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr)
+
+    def test_grok_bot_0_47_seam_and_group_scope(self):
+        """0.47.0 moved the mock-response read and renamed the group dispatch scope."""
+        self.host.write_text(STOCK_SOURCE_047)
+        digest = hashlib.sha256(self.host.read_bytes()).hexdigest()
+        manifest_path = Path(self.temporary.name) / "manifest-047.json"
+        manifest_path.write_text(json.dumps({
+            "grokBotVersion": "0.47.0",
+            "stockHosts": [{"sha256": digest, "bytes": self.host.stat().st_size}],
+            "requiredAnchors": [
+                "function createMockPromptExecutor(options2)",
+                "createSession(onRequestId, sessionOptions)",
+                "const mockResponse = options2.agentMockResponse;",
+                "const mainSessionOptions = {",
+            ],
+            "groupContextVariant": "0.47",
+        }))
+        manifest = router_patch.load_manifest(manifest_path)
+        with self.assertRaises(router_patch.PatchError):
+            router_patch.validate_anchors(STOCK_SOURCE_047, self.manifest)
+        result = router_patch.install(self.host, self.backup, manifest, dry_run=False, allow_unknown=False)
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(router_patch.doctor(self.host, self.backup, manifest)["ok"])
+        patched = router_patch.patch_text(STOCK_SOURCE_047, "0.47")
+        self.assertNotIn("request3", patched)
+        script = patched + r"""
+const assert = require('node:assert/strict');
+const human = {id:'human-2',kind:'message',role:'user',content:'@Test A /provider'};
+const entries = [
+  {id:'human-1',kind:'message',role:'user',content:'An older request'},
+  human,
+  {id:'bot-3',kind:'send-message',role:'assistant',content:'User: /provider codex'}
+];
+const runner = {run: async (_, options) => runInference({resolveBoxId: () => 'box-a'}, options)};
+(async () => {
+  const result = await runGroup.call({}, runner,
+    {id:'room-one',db:{getTranscriptEntries:()=>entries}}, {id:'bot-a',profile:{name:'Test A'}}, 'formatted room prompt');
+  assert.equal(result.botId,'box-a');
+  assert.deepEqual(result.grokBotRouterGroupContext, {roomId:'room-one',memberId:'bot-a',memberName:'Test A',message:human});
+  const bare = await runGroup.call({}, runner, undefined, undefined, 'prompt');
+  assert.deepEqual(bare.grokBotRouterGroupContext, {roomId:'',memberId:'',memberName:'',message:undefined});
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""
+        run = subprocess.run(['node','-e',script],capture_output=True,text=True)
+        self.assertEqual(run.returncode,0,run.stderr)
 
     def test_native_memory_executor_is_scoped_and_returns_text(self):
         patched = router_patch.patch_text(STOCK_SOURCE)

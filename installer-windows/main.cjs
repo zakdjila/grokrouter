@@ -9,7 +9,7 @@ const WebSocket = require("ws");
 const { createWorker } = require("tesseract.js");
 
 const execFileAsync = promisify(execFile);
-const SUPPORTED_GROK_VERSIONS = ["0.30.0", "0.36.0"];
+const SUPPORTED_GROK_VERSIONS = ["0.30.0", "0.36.0", "0.47.0"];
 const SUPPORTED_GROK_VERSION = SUPPORTED_GROK_VERSIONS.join(", ");
 let detectedGrokVersion = "0.30.0";
 const CDP_PORT = 19222;

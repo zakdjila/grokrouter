@@ -22,7 +22,7 @@ test("Windows installer version matches the shared release version", () => {
 });
 
 test("Windows installer keeps the exact compatibility and local-only gates", () => {
-  assert.match(main, /SUPPORTED_GROK_VERSIONS = \["0\.30\.0", "0\.36\.0"\]/);
+  assert.match(main, /SUPPORTED_GROK_VERSIONS = \["0\.30\.0", "0\.36\.0", "0\.47\.0"\]/);
   assert.match(main, /metadata\.Status !== "Valid"/);
   assert.match(main, /127\.0\.0\.1:\$\{CDP_PORT\}/);
   assert.match(main, /--remote-debugging-address=127\.0\.0\.1/);
