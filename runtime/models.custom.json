@@ -1,0 +1,40 @@
+{
+  "openRouterModels": [
+    "anthropic/claude-sonnet-4.6",
+    "anthropic/claude-opus-4.6",
+    "anthropic/claude-haiku-4.5",
+    "deepseek/deepseek-v4.1-flash",
+    "deepseek/deepseek-v4-flash",
+    "deepseek/deepseek-v4-flash-0731",
+    "deepseek/deepseek-v4-pro",
+    "openai/gpt-5.6-sol",
+    "openai/gpt-5.6-terra",
+    "openai/gpt-5.6-luna",
+    "google/gemini-3.1-pro-preview",
+    "google/gemini-3.1-flash-lite",
+    "x-ai/grok-4.6",
+    "moonshotai/kimi-k3",
+    "qwen/qwen3.6-max-preview",
+    "z-ai/glm-5.3"
+  ],
+  "openRouterAliases": {
+    "sonnet": "anthropic/claude-sonnet-4.6",
+    "claude": "anthropic/claude-sonnet-4.6",
+    "opus": "anthropic/claude-opus-4.6",
+    "haiku": "anthropic/claude-haiku-4.5",
+    "deepseek": "deepseek/deepseek-v4.1-flash",
+    "flash": "deepseek/deepseek-v4.1-flash",
+    "flash0423": "deepseek/deepseek-v4-flash",
+    "flash0731": "deepseek/deepseek-v4-flash-0731",
+    "deepseek-pro": "deepseek/deepseek-v4-pro",
+    "sol": "openai/gpt-5.6-sol",
+    "terra": "openai/gpt-5.6-terra",
+    "luna": "openai/gpt-5.6-luna",
+    "gemini": "google/gemini-3.1-pro-preview",
+    "gemini-lite": "google/gemini-3.1-flash-lite",
+    "grok": "x-ai/grok-4.6",
+    "kimi": "moonshotai/kimi-k3",
+    "qwen": "qwen/qwen3.6-max-preview",
+    "glm": "z-ai/glm-5.3"
+  }
+}

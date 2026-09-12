@@ -2009,8 +2009,21 @@ function configuredModels(config, provider) {
   ])];
 }
 
-function modelAliases(provider) {
-  return provider === "openrouter"
+function configuredAliases(config, provider) {
+  const raw = provider === "openrouter" ? config?.openRouterAliases : config?.codexAliases;
+  const out = {};
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    for (const [alias, model] of Object.entries(raw)) {
+      if (typeof alias === "string" && alias.trim() && typeof model === "string" && model.trim()) {
+        out[alias.trim().toLowerCase()] = model.trim();
+      }
+    }
+  }
+  return out;
+}
+
+function modelAliases(provider, config) {
+  const builtIn = provider === "openrouter"
     ? {
       claude: "anthropic/claude-sonnet-4.6",
       sonnet: "anthropic/claude-sonnet-4.6",
@@ -2020,6 +2033,7 @@ function modelAliases(provider) {
       luna: "openai/gpt-5.6-luna",
     }
     : { sol: "gpt-5.6-sol", terra: "gpt-5.6-terra", luna: "gpt-5.6-luna", "gpt-5.6": "gpt-5.6-sol" };
+  return { ...builtIn, ...configuredAliases(config, provider) };
 }
 
 async function doctorText(config, state) {
@@ -2121,9 +2135,13 @@ async function controlResult(config, key, state, input) {
   if (command === "/model") return result(`${providerLabel(state.provider)} model: ${state.model}. Reasoning: ${state.reasoning}.`);
   if (command === "/models") {
     const models = configuredModels(config, state.provider);
+    const aliases = Object.entries(configuredAliases(config, state.provider));
     return result([
       `${providerLabel(state.provider)} models:`,
       ...models.map((model) => `• ${model}`),
+      ...(aliases.length > 0
+        ? ["Short names (send /model <name>):", ...aliases.map(([alias, model]) => `• ${alias} → ${model}`)]
+        : []),
       `Current: ${state.model}`,
       "Switch: send /model <id>, /models <id>, or paste one listed vendor/model ID by itself.",
     ].join("\n"));
@@ -2131,7 +2149,7 @@ async function controlResult(config, key, state, input) {
   const modelMatch = normalized.match(/^\/models?\s+(.+)$/i);
   if (modelMatch) {
     const requested = modelMatch[1].trim();
-    const model = modelAliases(state.provider)[requested.toLowerCase()] || requested;
+    const model = modelAliases(state.provider, config)[requested.toLowerCase()] || requested;
     if (state.provider === "codex" && !configuredModels(config, "codex").includes(model)) {
       return result(`Unknown Codex model “${requested}”. Use /models to see the supported models.`);
     }
