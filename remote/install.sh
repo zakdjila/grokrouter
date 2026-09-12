@@ -62,10 +62,12 @@ usage() {
     "  --claude-host-login          Use a `claude login` run inside the Bot computer" \
     "  --openrouter-model vendor/model" \
     "  --install-root PATH          Development/testing only" \
-    "  --no-restart                 Do not restart the Grok host"
+    "  --no-restart                 Do not restart the Grok host" \
+    "  --restore-stock-first        Put back the verified stock host before patching when a GrokRouter adapter is already present"
 }
 
 RESTART_HOST=1
+RESTORE_STOCK_FIRST=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --grok-version)
@@ -109,6 +111,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-restart)
       RESTART_HOST=0
+      shift
+      ;;
+    --restore-stock-first)
+      RESTORE_STOCK_FIRST=1
       shift
       ;;
     -h|--help)
@@ -442,6 +448,41 @@ run_adapter_patch() {
     python3 "$INSTALL_ROOT/patch/router_patch.py" "${PATCH_ARGS[@]}"
   fi
 }
+# An explicit --restore-stock-first request (the desktop installer's Install
+# button) may put back the stock host before patching, but only when the live
+# host carries a GrokRouter marker and the retained backup passes the exact
+# signed allowlist. Unknown or foreign hosts are never replaced here; that
+# policy lives in router_patch.py and stays untouched.
+if [[ "$RESTORE_STOCK_FIRST" == "1" && -f "$PATCH_HOST" ]] \
+  && grep -q -E 'GROKBOT_MODEL_ROUTER_V[0-9]+|GROK_SDK_ADAPTER_V[0-9]+' "$PATCH_HOST"; then
+  printf 'A previous GrokRouter adapter is present. Putting back the verified stock host first…\n'
+  OLD_WATCHDOG_PID_FILE="$INSTALL_PARENT/grokbot-router-watchdog.pid"
+  if [[ -f "$OLD_WATCHDOG_PID_FILE" ]]; then
+    OLD_WATCHDOG_PID="$(cat "$OLD_WATCHDOG_PID_FILE" 2>/dev/null || true)"
+    if [[ "$OLD_WATCHDOG_PID" =~ ^[0-9]+$ ]]; then
+      kill "$OLD_WATCHDOG_PID" >/dev/null 2>&1 || true
+    fi
+  fi
+  run_stock_restore() {
+    if [[ -n "$ACTIVE_REGISTRY" ]]; then
+      python3 "$INSTALL_ROOT/patch/router_patch.py" --restore "${PATCH_ARGS[@]}" --host-registry "$ACTIVE_REGISTRY"
+    else
+      python3 "$INSTALL_ROOT/patch/router_patch.py" --restore "${PATCH_ARGS[@]}"
+    fi
+  }
+  if ! RESTORE_OUTPUT="$(run_stock_restore 2>&1)"; then
+    if UPDATED_REGISTRY="$("$INSTALL_ROOT/bin/host-registry" refresh 2>/dev/null || true)" && [[ -n "$UPDATED_REGISTRY" ]]; then
+      ACTIVE_REGISTRY="$UPDATED_REGISTRY"
+    fi
+    if ! RESTORE_OUTPUT="$(run_stock_restore 2>&1)"; then
+      printf '%s\n' "$RESTORE_OUTPUT" >&2
+      rollback_runtime
+      fail_install "RESTORE_STOCK" "A previous GrokRouter adapter is on this Bot computer, but its retained stock backup did not pass the stock-host checks, so nothing was changed. Copy safe diagnostics."
+    fi
+  fi
+  printf '%s\n' "$RESTORE_OUTPUT"
+  printf 'STOCKRESTORE=OK\n'
+fi
 if ! ADAPTER_OUTPUT="$(run_adapter_patch 2>&1)"; then
   printf 'The bundled compatibility list did not recognize this Bot computer. Checking for a signed update…\n'
   if UPDATED_REGISTRY="$("$INSTALL_ROOT/bin/host-registry" refresh 2>/dev/null || true)" && [[ -n "$UPDATED_REGISTRY" ]]; then

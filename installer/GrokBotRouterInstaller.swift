@@ -550,7 +550,7 @@ final class RouterInstallerController: NSObject, NSApplicationDelegate {
     }
 
     private func redactedDiagnosticExcerpt(_ text: String) -> String {
-        let interestingWords = ["ERROR", "FAILED", "REQUIRED", "MISSING", "NPM", "GROKROUTER", "GROKBOT", "RESTORED", "STATUS", "HOSTSHA", "HOSTBYTES", "CLOUDARCH", "ANCHORS", "PATCHDRYRUN", "HOSTTRUST", "SUPPORTEDVERSION"]
+        let interestingWords = ["ERROR", "FAILED", "REQUIRED", "MISSING", "NPM", "GROKROUTER", "GROKBOT", "RESTORED", "STATUS", "HOSTSHA", "HOSTBYTES", "CLOUDARCH", "ANCHORS", "PATCHDRYRUN", "HOSTTRUST", "SUPPORTEDVERSION", "STOCKRESTORE"]
         let selected = text
             .split(whereSeparator: { $0.isNewline })
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -1512,7 +1512,7 @@ final class RouterInstallerController: NSObject, NSApplicationDelegate {
             "rm -rf /tmp/grokbot-router-installer/payload",
             "mkdir -p /tmp/grokbot-router-installer/payload",
             "tar -xzf /tmp/grokbot-router-installer/payload.tgz -C /tmp/grokbot-router-installer/payload --strip-components=1",
-            "if ROUTER_INSTALL_ATTEMPT=\(installAttempt) bash /tmp/grokbot-router-installer/payload/remote/install.sh --no-restart --grok-version \(detectedGrokVersion) --provider \(defaultProvider) --providers \(providers) --codex-model \(codexModel) --claude-model \(claudeModel) --openrouter-model \(openRouterModel); then clear; printf %s \(installPayload) | base64 -d; else code=$?; printf %s \(failurePayload) | base64 -d; echo $code; fi"
+            "if ROUTER_INSTALL_ATTEMPT=\(installAttempt) bash /tmp/grokbot-router-installer/payload/remote/install.sh --no-restart --restore-stock-first --grok-version \(detectedGrokVersion) --provider \(defaultProvider) --providers \(providers) --codex-model \(codexModel) --claude-model \(claudeModel) --openrouter-model \(openRouterModel); then clear; printf %s \(installPayload) | base64 -d; else code=$?; printf %s \(failurePayload) | base64 -d; echo $code; fi"
         ])
         appendLog("Transferring a SHA-256-verified payload into the Bot computer…")
         let installVNC = try await typeRemoteCommandsResilient(commands, client: client, pageSession: pageSession)
