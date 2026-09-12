@@ -20,9 +20,14 @@ python3 - "$ROOT/provider.json" "$TMP/models.custom.json" <<'PY'
 import json, sys
 cfg_path, custom_path = sys.argv[1], sys.argv[2]
 cfg = json.load(open(cfg_path)); custom = json.load(open(custom_path))
-cfg["openRouterModels"] = custom["openRouterModels"]
-cfg["openRouterAliases"] = custom["openRouterAliases"]
+# Every catalog key the file actually carries, so a provider added later is
+# not silently left on whatever the installer shipped.
+for key in ("openRouterModels", "openRouterAliases", "codexModels", "codexAliases",
+            "claudeModels", "claudeAliases"):
+    if key in custom:
+        cfg[key] = custom[key]
 json.dump(cfg, open(cfg_path, "w"), indent=2); open(cfg_path, "a").write("\n")
-print("models:", len(cfg["openRouterModels"]), "aliases:", len(cfg["openRouterAliases"]))
+print("openrouter:", len(cfg.get("openRouterModels", [])), "models,", len(cfg.get("openRouterAliases", {})), "aliases")
+print("claude:", len(cfg.get("claudeModels", [])), "models,", len(cfg.get("claudeAliases", {})), "aliases")
 PY
 echo "GROKROUTER_MODELS_UPDATED $STAMP"
