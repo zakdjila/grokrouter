@@ -550,7 +550,7 @@ final class RouterInstallerController: NSObject, NSApplicationDelegate {
     }
 
     private func redactedDiagnosticExcerpt(_ text: String) -> String {
-        let interestingWords = ["ERROR", "FAILED", "REQUIRED", "MISSING", "NPM", "GROKROUTER", "HOSTSHA", "HOSTBYTES", "CLOUDARCH", "ANCHORS", "PATCHDRYRUN", "HOSTTRUST", "SUPPORTEDVERSION"]
+        let interestingWords = ["ERROR", "FAILED", "REQUIRED", "MISSING", "NPM", "GROKROUTER", "GROKBOT", "RESTORED", "STATUS", "HOSTSHA", "HOSTBYTES", "CLOUDARCH", "ANCHORS", "PATCHDRYRUN", "HOSTTRUST", "SUPPORTEDVERSION"]
         let selected = text
             .split(whereSeparator: { $0.isNewline })
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -1245,6 +1245,9 @@ final class RouterInstallerController: NSObject, NSApplicationDelegate {
         var observedPhase = -1
         var consecutiveGenericErrors = 0
         var lastTerminalText = ""
+        var screenshotFailures = 0
+        var emptyReads = 0
+        var successfulReads = 0
         // The timeout is measured from the last visible progress, not from the
         // start. A slow first-time Codex dependency download still completes
         // as long as the Bot computer keeps reporting new phases.
@@ -1267,7 +1270,10 @@ final class RouterInstallerController: NSObject, NSApplicationDelegate {
             do {
                 text = try await screenshotText(client, sessionID: activeSession)
                 lastTerminalText = text
+                successfulReads += 1
+                if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { emptyReads += 1 }
             } catch {
+                screenshotFailures += 1
                 if let vnc = try? await targets(client).first(where: { $0.type == "webview" && $0.url.contains("/vnc.html") }),
                    let replacement = try? await attach(client, targetID: vnc.id) {
                     activeTargetID = vnc.id
@@ -1317,7 +1323,8 @@ final class RouterInstallerController: NSObject, NSApplicationDelegate {
             }
         }
         let message = "The Bot terminal did not report completion before the timeout."
-        lastDiagnosticReport = makeDiagnosticReport(failure: message, terminalText: lastTerminalText)
+        let detail = "Waited \(timeoutSeconds)s for \(sentinel); OCR reads ok=\(successfulReads) empty=\(emptyReads) failed=\(screenshotFailures)."
+        lastDiagnosticReport = makeDiagnosticReport(failure: "\(message) \(detail)", terminalText: lastTerminalText)
         throw InstallerError.message("\(message) Copy safe diagnostics, then try again.")
     }
 
