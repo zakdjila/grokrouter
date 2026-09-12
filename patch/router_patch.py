@@ -616,7 +616,9 @@ def patch_text(source: str, group_variant: str = "0.36") -> str:
     # lineage values are turn-scoped. Forward it without changing stock
     # behavior so direct chats and channel turns share the addressed Bot's
     # router state.
-    identity_pattern = re.compile(r"(const mainSessionOptions = \{\n)(\s+modelId:)")
+    # Cursor's refreshed 0.47.0 host opens the literal with a spread that picks
+    # `modelId` or `executorProfile`; accept both shapes.
+    identity_pattern = re.compile(r"(const mainSessionOptions = \{\n)(\s+(?:modelId:|\.\.\.executorProfile ))")
     source, identity_count = identity_pattern.subn(
         lambda match: (
             f"{match.group(1)}"
