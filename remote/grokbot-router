@@ -69,7 +69,7 @@ usage() {
     "  doctor                         Verify runtime, host patch, and credentials" \
     "  repair [--no-restart]           Reapply the exact-gated host patch" \
     "  auth codex                     Start Codex device sign-in" \
-    "  provider codex|openrouter      Change the default for new Bot threads" \
+    "  provider codex|claude|openrouter  Change the default for new Bot threads" \
     "  model codex MODEL              Change the default Codex model" \
     "  model openrouter vendor/model  Change the default OpenRouter model" \
     "  enable | disable               Enable or bypass the router" \
@@ -267,8 +267,8 @@ PY
   provider)
     require_config
     provider="${2:-}"
-    if [[ "$provider" != "codex" && "$provider" != "openrouter" ]]; then
-      printf 'ERROR: provider must be codex or openrouter\n' >&2
+    if [[ "$provider" != "codex" && "$provider" != "claude" && "$provider" != "openrouter" ]]; then
+      printf 'ERROR: provider must be codex, claude or openrouter\n' >&2
       exit 2
     fi
     update_config provider "$provider"
@@ -285,6 +285,8 @@ PY
     fi
     if [[ "$provider" == "codex" ]]; then
       update_config codexModel "$model"
+    elif [[ "$provider" == "claude" ]]; then
+      update_config claudeModel "$model"
     elif [[ "$provider" == "openrouter" ]]; then
       if [[ ! "$model" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._:+-]+$ ]]; then
         printf 'ERROR: OpenRouter models use vendor/model format\n' >&2
@@ -292,7 +294,7 @@ PY
       fi
       update_config openRouterModel "$model"
     else
-      printf 'ERROR: provider must be codex or openrouter\n' >&2
+      printf 'ERROR: provider must be codex, claude or openrouter\n' >&2
       exit 2
     fi
     printf '%s default model updated to %s\n' "$provider" "$model"

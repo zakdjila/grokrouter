@@ -1535,6 +1535,9 @@ final class RouterInstallerController: NSObject, NSApplicationDelegate {
         if defaultProvider == "openrouter" {
             return "Installed with OpenRouter selected. Send /router doctor in Grok Bot."
         }
+        if defaultProvider == "claude" {
+            return "Installed with Claude Agent SDK as the default provider. Send /router doctor in Grok Bot."
+        }
         if providers.contains("codex") {
             return "Installed. Click Start Codex Sign-in, then send /router doctor in Grok Bot."
         }
