@@ -175,9 +175,12 @@ final class InstallerCardView: NSView {
 final class RouterInstallerController: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     private let codexCheckbox = NSButton(checkboxWithTitle: "Codex SDK", target: nil, action: nil)
+    private let claudeCheckbox = NSButton(checkboxWithTitle: "Claude Agent SDK", target: nil, action: nil)
     private let openRouterCheckbox = NSButton(checkboxWithTitle: "OpenRouter", target: nil, action: nil)
     private let defaultProviderPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let codexModelPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let claudeModelPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let claudeTokenField = NSSecureTextField()
     private let openRouterModelPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let openRouterKeyField = NSSecureTextField()
     private let installButton = NSButton(title: "Install Router", target: nil, action: nil)
@@ -243,14 +246,24 @@ final class RouterInstallerController: NSObject, NSApplicationDelegate {
         hero.spacing = 20
 
         codexCheckbox.state = .on
+        claudeCheckbox.state = .on
         openRouterCheckbox.state = .on
         codexCheckbox.target = self
+        claudeCheckbox.target = self
         openRouterCheckbox.target = self
         codexCheckbox.action = #selector(providerSelectionChanged)
+        claudeCheckbox.action = #selector(providerSelectionChanged)
         openRouterCheckbox.action = #selector(providerSelectionChanged)
 
-        defaultProviderPopup.addItems(withTitles: ["Codex SDK", "OpenRouter"])
+        defaultProviderPopup.addItems(withTitles: ["Codex SDK", "Claude Agent SDK", "OpenRouter"])
         codexModelPopup.addItems(withTitles: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
+        claudeModelPopup.addItems(withTitles: [
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-4-5",
+            "claude-fable-5-1",
+            "claude-opus-4-8"
+        ])
         openRouterModelPopup.addItems(withTitles: [
             "anthropic/claude-sonnet-4.6",
             "openai/gpt-5.6-sol",
@@ -260,14 +273,18 @@ final class RouterInstallerController: NSObject, NSApplicationDelegate {
             "google/gemini-3.1-flash-lite"
         ])
         openRouterKeyField.placeholderString = "OpenRouter API key (stored only in Grok Bot Secrets)"
+        claudeTokenField.placeholderString = "Claude token from `claude setup-token` (stored only in Grok Bot Secrets)"
 
         codexCheckbox.font = .systemFont(ofSize: 14, weight: .medium)
+        claudeCheckbox.font = .systemFont(ofSize: 14, weight: .medium)
         openRouterCheckbox.font = .systemFont(ofSize: 14, weight: .medium)
-        let providerRow = NSStackView(views: [codexCheckbox, openRouterCheckbox])
+        let providerRow = NSStackView(views: [codexCheckbox, claudeCheckbox, openRouterCheckbox])
         providerRow.orientation = .horizontal
         providerRow.spacing = 28
         let defaultRow = formRow("Default provider", defaultProviderPopup)
         let codexRow = formRow("Codex model", codexModelPopup)
+        let claudeRow = formRow("Claude model", claudeModelPopup)
+        let claudeTokenRow = formRow("Claude token", claudeTokenField)
         let openRouterRow = formRow("OpenRouter model", openRouterModelPopup)
         let keyRow = formRow("OpenRouter key", openRouterKeyField)
 
@@ -276,7 +293,7 @@ final class RouterInstallerController: NSObject, NSApplicationDelegate {
             title: "Choose the models",
             detail: "New Bots start on the default. Each Bot can switch later."
         )
-        let modelStack = NSStackView(views: [modelSectionHeader, providerRow, defaultRow, codexRow, openRouterRow, keyRow])
+        let modelStack = NSStackView(views: [modelSectionHeader, providerRow, defaultRow, codexRow, claudeRow, claudeTokenRow, openRouterRow, keyRow])
         modelStack.orientation = .vertical
         modelStack.alignment = .leading
         modelStack.spacing = 12
@@ -448,18 +465,22 @@ final class RouterInstallerController: NSObject, NSApplicationDelegate {
 
     @objc private func providerSelectionChanged() {
         let codex = codexCheckbox.state == .on
+        let claude = claudeCheckbox.state == .on
         let openRouter = openRouterCheckbox.state == .on
         let previousSelection = defaultProviderPopup.titleOfSelectedItem
         codexModelPopup.isEnabled = codex
+        claudeModelPopup.isEnabled = claude
+        claudeTokenField.isEnabled = claude
         openRouterModelPopup.isEnabled = openRouter
         openRouterKeyField.isEnabled = openRouter
         defaultProviderPopup.removeAllItems()
         if codex { defaultProviderPopup.addItem(withTitle: "Codex SDK") }
+        if claude { defaultProviderPopup.addItem(withTitle: "Claude Agent SDK") }
         if openRouter { defaultProviderPopup.addItem(withTitle: "OpenRouter") }
         if let previousSelection, defaultProviderPopup.itemTitles.contains(previousSelection) {
             defaultProviderPopup.selectItem(withTitle: previousSelection)
         }
-        installButton.isEnabled = (codex || openRouter) && !busy
+        installButton.isEnabled = (codex || claude || openRouter) && !busy
     }
 
     private func setBusy(_ value: Bool, status: String) {
@@ -468,6 +489,7 @@ final class RouterInstallerController: NSObject, NSApplicationDelegate {
         progress.isHidden = !value
         if value { progress.startAnimation(nil) } else { progress.stopAnimation(nil) }
         codexCheckbox.isEnabled = !value
+        claudeCheckbox.isEnabled = !value
         openRouterCheckbox.isEnabled = !value
         installButton.isEnabled = !value
         installButton.alphaValue = value ? 0.55 : 1
@@ -622,12 +644,29 @@ final class RouterInstallerController: NSObject, NSApplicationDelegate {
 
     @objc private func startInstall() {
         let codex = codexCheckbox.state == .on
+        let claude = claudeCheckbox.state == .on
         let openRouter = openRouterCheckbox.state == .on
-        guard codex || openRouter else { return }
-        let defaultProvider = defaultProviderPopup.titleOfSelectedItem == "OpenRouter" ? "openrouter" : "codex"
-        let providers = [codex ? "codex" : nil, openRouter ? "openrouter" : nil].compactMap { $0 }.joined(separator: ",")
+        guard codex || claude || openRouter else { return }
+        let selectedDefault = defaultProviderPopup.titleOfSelectedItem
+        let defaultProvider = selectedDefault == "OpenRouter"
+            ? "openrouter"
+            : selectedDefault == "Claude Agent SDK" ? "claude" : "codex"
+        let providers = [codex ? "codex" : nil, claude ? "claude" : nil, openRouter ? "openrouter" : nil]
+            .compactMap { $0 }
+            .joined(separator: ",")
         let codexModel = codexModelPopup.titleOfSelectedItem ?? "gpt-5.6-sol"
+        let claudeModel = claudeModelPopup.titleOfSelectedItem ?? "claude-opus-5"
         let openRouterModel = openRouterModelPopup.titleOfSelectedItem ?? "anthropic/claude-sonnet-4.6"
+        let claudeToken = claudeTokenField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if claude && !claudeToken.isEmpty && !isValidClaudeToken(claudeToken) {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "That Claude token does not look valid"
+            alert.informativeText = "Run `claude setup-token` on your own machine and paste the complete sk-ant- value. Nothing has been saved or installed."
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
         let key = openRouterKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         if openRouter && !key.isEmpty && !isValidOpenRouterKey(key) {
             let alert = NSAlert()
@@ -639,13 +678,16 @@ final class RouterInstallerController: NSObject, NSApplicationDelegate {
             return
         }
         openRouterKeyField.stringValue = ""
+        claudeTokenField.stringValue = ""
         runOperation("Step 1 of 6 · Checking Grok Bot…", retryableInstall: true) {
             try await self.install(
                 defaultProvider: defaultProvider,
                 providers: providers,
                 codexModel: codexModel,
+                claudeModel: claudeModel,
                 openRouterModel: openRouterModel,
-                openRouterKey: key
+                openRouterKey: key,
+                claudeToken: claudeToken
             )
         }
     }
@@ -829,6 +871,11 @@ final class RouterInstallerController: NSObject, NSApplicationDelegate {
         value.hasPrefix("sk-or-v1-") && value.count >= 33 && !value.contains(where: { $0.isWhitespace })
     }
 
+    /// A subscription token from `claude setup-token`, or an Anthropic API key.
+    private func isValidClaudeToken(_ value: String) -> Bool {
+        value.hasPrefix("sk-ant-") && value.count >= 28 && !value.contains(where: { $0.isWhitespace })
+    }
+
     private func evaluate(_ client: CDPClient, sessionID: String, expression: String, timeoutSeconds: TimeInterval = 12) async throws -> [String: Any] {
         let response = try await client.call("Runtime.evaluate", params: [
             "expression": expression,
@@ -849,13 +896,23 @@ final class RouterInstallerController: NSObject, NSApplicationDelegate {
     }
 
     private func saveOpenRouterKey(_ key: String, client: CDPClient, pageSession: String) async throws {
-        guard !key.isEmpty else { return }
-        appendLog("Saving OPENROUTER_API_KEY through Grok Bot's protected Secrets store…")
-        let literal = try jsonLiteral(key)
+        try await saveSecret(named: "OPENROUTER_API_KEY", value: key, client: client, pageSession: pageSession)
+    }
+
+    /// An OAuth token bills the Claude subscription; an API key bills the console account.
+    private func saveClaudeToken(_ token: String, client: CDPClient, pageSession: String) async throws {
+        let name = token.hasPrefix("sk-ant-oat") ? "CLAUDE_CODE_OAUTH_TOKEN" : "ANTHROPIC_API_KEY"
+        try await saveSecret(named: name, value: token, client: client, pageSession: pageSession)
+    }
+
+    private func saveSecret(named name: String, value: String, client: CDPClient, pageSession: String) async throws {
+        guard !value.isEmpty else { return }
+        appendLog("Saving \(name) through Grok Bot's protected Secrets store…")
+        let literal = try jsonLiteral(value)
         _ = try await evaluate(
             client,
             sessionID: pageSession,
-            expression: "window.desktop.secrets.upsert({OPENROUTER_API_KEY:\(literal)}).then(()=>({saved:true}))"
+            expression: "window.desktop.secrets.upsert({\(name):\(literal)}).then(()=>({saved:true}))"
         )
     }
 
@@ -1373,8 +1430,10 @@ final class RouterInstallerController: NSObject, NSApplicationDelegate {
         defaultProvider: String,
         providers: String,
         codexModel: String,
+        claudeModel: String,
         openRouterModel: String,
-        openRouterKey: String
+        openRouterKey: String,
+        claudeToken: String
     ) async throws -> String {
         try validateGrokApp()
         updateStatus("Step 1 of 6 · Grok Bot \(detectedGrokVersion) is supported.")
@@ -1386,6 +1445,13 @@ final class RouterInstallerController: NSObject, NSApplicationDelegate {
                 appendLog("No OpenRouter key entered. Keeping any existing OPENROUTER_API_KEY in Grok Bot Secrets.")
             } else {
                 try await saveOpenRouterKey(openRouterKey, client: client, pageSession: pageSession)
+            }
+        }
+        if providers.contains("claude") {
+            if claudeToken.isEmpty {
+                appendLog("No Claude token entered. Keeping any existing Claude credential in Grok Bot Secrets.")
+            } else {
+                try await saveClaudeToken(claudeToken, client: client, pageSession: pageSession)
             }
         }
         appendLog("Verifying that keyboard input is isolated to the Bot terminal…")
@@ -1439,7 +1505,7 @@ final class RouterInstallerController: NSObject, NSApplicationDelegate {
             "rm -rf /tmp/grokbot-router-installer/payload",
             "mkdir -p /tmp/grokbot-router-installer/payload",
             "tar -xzf /tmp/grokbot-router-installer/payload.tgz -C /tmp/grokbot-router-installer/payload --strip-components=1",
-            "if ROUTER_INSTALL_ATTEMPT=\(installAttempt) bash /tmp/grokbot-router-installer/payload/remote/install.sh --no-restart --grok-version \(detectedGrokVersion) --provider \(defaultProvider) --providers \(providers) --codex-model \(codexModel) --openrouter-model \(openRouterModel); then clear; printf %s \(installPayload) | base64 -d; else code=$?; printf %s \(failurePayload) | base64 -d; echo $code; fi"
+            "if ROUTER_INSTALL_ATTEMPT=\(installAttempt) bash /tmp/grokbot-router-installer/payload/remote/install.sh --no-restart --grok-version \(detectedGrokVersion) --provider \(defaultProvider) --providers \(providers) --codex-model \(codexModel) --claude-model \(claudeModel) --openrouter-model \(openRouterModel); then clear; printf %s \(installPayload) | base64 -d; else code=$?; printf %s \(failurePayload) | base64 -d; echo $code; fi"
         ])
         appendLog("Transferring a SHA-256-verified payload into the Bot computer…")
         let installVNC = try await typeRemoteCommandsResilient(commands, client: client, pageSession: pageSession)

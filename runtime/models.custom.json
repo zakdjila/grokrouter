@@ -36,5 +36,19 @@
     "kimi": "moonshotai/kimi-k3",
     "qwen": "qwen/qwen3.6-max-preview",
     "glm": "z-ai/glm-5.3"
+  },
+  "claudeModels": [
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-haiku-4-5",
+    "claude-fable-5-1",
+    "claude-opus-4-8"
+  ],
+  "claudeAliases": {
+    "opus": "claude-opus-5",
+    "sonnet": "claude-sonnet-5",
+    "haiku": "claude-haiku-4-5",
+    "fable": "claude-fable-5-1",
+    "opus48": "claude-opus-4-8"
   }
 }

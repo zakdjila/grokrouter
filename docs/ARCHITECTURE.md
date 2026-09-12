@@ -11,7 +11,7 @@ This document is the implementation-level companion to [How it works, without th
 | Official Grok Bot | Chat UI, Bots, transcript, computer, files, browser, tool execution, permission UX and assistant delivery | Routed provider credentials or per-Bot provider selection |
 | Patched host executor | Decide stock versus routed path, sanitize the host payload, launch the router runtime and translate its result back into Grok's protocol | Provider implementation, long-term state or arbitrary tool execution |
 | Router runtime | Deterministic controls, stable Bot identity, provider/model state, replay protection, provider calls, transcript conversion and redacted audit | Grok's UI, permission decisions or the computer itself |
-| Codex SDK / OpenRouter | Model inference and provider-native thread state | Authority to invent a Grok tool that the host did not offer |
+| Codex SDK / Claude Agent SDK / OpenRouter | Model inference and provider-native thread state | Authority to invent a Grok tool that the host did not offer |
 | Native platform installer shells | Swift/AppKit on macOS and sandboxed Electron on Windows: exact compatibility checks, loopback/noVNC transport, checksummed install, provider setup, restore and cleanup | Grok account data or an unknown host build |
 
 ## Install and update flow

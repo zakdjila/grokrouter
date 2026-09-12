@@ -1,6 +1,6 @@
 <p align="center"><img src="installer/Assets/grokbot-router-mascot-1024.png" width="176" alt="GrokRouter"></p>
 <h1 align="center">GrokRouter</h1>
-<p align="center"><strong>Choose the model for each Grok Bot.</strong><br>Use Codex SDK or OpenRouter from Grok Bot's existing chat.</p>
+<p align="center"><strong>Choose the model for each Grok Bot.</strong><br>Use Codex SDK, Claude Agent SDK or OpenRouter from Grok Bot's existing chat.</p>
 
 GrokRouter is an experimental, unofficial, reversible model router. Each Bot remembers its own provider and model. Grok Bot continues to own conversations, files, the computer, permissions, and any outer tools it supplies to the routed model. Native maintenance sessions such as memory synthesis keep Grok's original inference backend.
 
@@ -14,6 +14,7 @@ GrokRouter is an experimental, unofficial, reversible model router. Each Bot rem
 | macOS | Apple silicon, macOS 12+, Apple Command Line Tools |
 | Windows x64 / Arm64 | Source preview; CI packaging is separate from native installation verification |
 | Codex SDK | Sign in with your existing Codex account in the Bot computer |
+| Claude Agent SDK | A subscription token from `claude setup-token`, or `claude login` in the Bot computer |
 | OpenRouter | Your OpenRouter API key; provider usage is billed by OpenRouter |
 | Computer and sub-agents | Available only when Grok offers the necessary schemas; see the [verification matrix](docs/TEST-MATRIX.md) for provider-specific evidence |
 
@@ -29,8 +30,8 @@ GrokRouter is an experimental, unofficial, reversible model router. Each Bot rem
    ```
 
    This downloads tagged source, builds and signs the app locally, installs it at `~/Applications/GrokRouter.app`, and opens it. It does not need `sudo`. If Apple Command Line Tools are missing, finish Apple's installation and repeat the command.
-3. Choose **Codex SDK**, **OpenRouter**, or both. Choose the default provider for new Bots. If using OpenRouter, enter its complete key in the installer; the installer hands it to Grok's protected Secrets store and clears the field.
-4. Click **Install Router**. Wait for a successful installation receipt. If using Codex, choose **Codex sign-in** and complete the sign-in shown in the Bot terminal.
+3. Choose **Codex SDK**, **Claude Agent SDK**, **OpenRouter**, or any combination. Choose the default provider for new Bots. If using OpenRouter, enter its complete key in the installer. If using Claude, paste a token from `claude setup-token` run on your own machine. The installer hands each one to Grok's protected Secrets store and clears the field.
+4. Click **Install Router**. Wait for a successful installation receipt. If using Codex, choose **Codex sign-in** and complete the sign-in shown in the Bot terminal. If you would rather not paste a Claude token, run `claude login` in the Bot terminal instead and install with `--claude-host-login`.
 5. Create a **brand-new Bot after installation**. Type these commands manually into its normal chat, one at a time:
 
    ```text
@@ -50,6 +51,7 @@ The ZIP alternative is the release's **Source code (zip) → Install GrokRouter.
 | --- | --- |
 | `/provider` | Show this Bot's provider and model |
 | `/provider codex` | Switch this Bot to Codex SDK |
+| `/provider claude` | Switch this Bot to Claude Agent SDK |
 | `/provider openrouter` | Switch this Bot to OpenRouter |
 | `/models` | List configured models and switching instructions |
 | `/model vendor/model` or `/models vendor/model` | Select a model explicitly |

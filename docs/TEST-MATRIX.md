@@ -19,6 +19,26 @@ The dated receipts are in [0.30.0 acceptance](acceptance-beta47-644a9c4-0.30.0.m
 
 Provider capability tests used Codex SDK `gpt-5.6-sol` and OpenRouter `anthropic/claude-sonnet-4.6`. OpenRouter Luna was verified for model selection, identity, and exact text. These results do not establish tool parity for every catalog model.
 
+## Claude Agent SDK provider (added after the September 9, 2026 lock)
+
+The Claude provider is **not covered by the beta.47 live gates above.** It has not been installed into a Grok Bot computer, and no fresh-Bot acceptance run exists for it. Treat it as unverified for live routing until those gates are repeated.
+
+What has been verified, on macOS against the real `@anthropic-ai/claude-agent-sdk` 0.3.269 and through `runtime/run-provider.mjs` itself, using `claude-haiku-4-5` at `low` effort (the weakest configuration in the catalog):
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Structured tool-bridge contract | Passed | `outputFormat` json_schema returns `structured_output` as `{text, toolCalls}` |
+| Session continuity | Passed | The same `session_id` was resumed across two turns and the model recalled the earlier turn |
+| Claude's own native tools | Passed | A real `Write` into the working directory produced the expected file |
+| Outer Grok tool bridge | Passed | A `TakeScreenshot` schema the model does not own came back as a `toolCalls` entry, on both a fresh and a resumed session |
+| Image input | Passed | A base64 screenshot block was read correctly through the streaming-input prompt |
+| In-chat controls | Passed | `/provider claude`, `/models`, `/model sonnet`, `/router doctor`, `/router help` through the real runtime |
+| Credential handling | Passed | Token and API key select their own env var; a malformed value is rejected without being echoed; audit output contains no `sk-ant-` |
+
+One live failure is worth recording. With the first prompt wording, Claude answered *"TakeScreenshot is not currently available in this environment"* instead of bridging the call: it looked only at its own tool list. The prompt now states outright that the outer tools are real, that they will never appear in its own tool list, and that it must not declare one unavailable. A regression test pins all three sentences.
+
+Sub-agent and computer parity for Claude, and every result on a real Bot computer, remain unproven.
+
 ## Automated checks
 
 The final production revision passed 70 runtime tests, 17 Python patch/executor tests, installer/payload integration checks, 12 Windows contract tests, and five release/compatibility tests. Mac build/signature verification and clean-source installation passed. GitHub CI `34336489366` passed Mac and native Windows packaging; CodeQL `34336489412` passed JavaScript and Python analysis. Documentation revision `aac8b99` also passed all required checks.

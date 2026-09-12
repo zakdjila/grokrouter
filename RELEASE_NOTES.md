@@ -1,3 +1,13 @@
+# Unreleased — Claude Agent SDK provider
+
+Adds `claude` as a third provider alongside Codex SDK and OpenRouter. Unlike OpenRouter, which reaches Claude as a plain chat completion, this runs the Claude Code harness inside the Bot computer: Claude gets its own Bash, file editing and web tools in the working directory, while outer Grok tools still come back through the structured `toolCalls` bridge.
+
+- `/provider claude`, `/models`, `/model opus|sonnet|haiku|fable`, `/reasoning` and `/router doctor` all understand the new provider.
+- Credentials are a subscription token from `claude setup-token` or an Anthropic API key, stored in Grok Bot's Secrets store. `--claude-host-login` instead relies on a `claude login` run inside the Bot computer.
+- Each Bot keeps its own Claude session id in the existing thread state, so switching provider or model still starts a clean thread.
+- **Not covered by the beta.47 live gates.** No install into a real Bot computer has been performed. See [TEST-MATRIX](docs/TEST-MATRIX.md) for exactly what was and was not verified.
+- Upgrading an already installed beta.47 router needs a stock restore and a fresh install: the generated host adapter changed, so previous-adapter reconstruction will not match it.
+
 # GrokRouter 0.1.0-beta.47 — source prerelease
 
 - Restores exact reviewed host hash and byte-count verification. Structural diagnostics cannot authenticate a stock host.

@@ -23,6 +23,7 @@ import {
   openRouterMessages,
   recoveredTextualOpenRouterToolCalls,
   runCodex,
+  runClaude,
   runOpenRouter,
   runTurn,
   userTurnFingerprint,
@@ -2309,7 +2310,7 @@ test("runner rejects oversized stdin indirectly through a normal exported turn c
       sessionOptions: { botId: "help-test" },
     });
     assert.equal(result.ok, true);
-    assert.match(result.text, /\/provider codex\|openrouter/);
+    assert.match(result.text, /\/provider codex\|claude\|openrouter/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -2694,4 +2695,407 @@ test("literal replies unwrap only an exact matching final delivery envelope with
     });
     assert.equal(calls,2);assert.equal(retry.text,"FRESH_BOT_TEXT_OK");assert.deepEqual(retry.toolCalls,[]);
   } finally {if(previous===undefined)delete process.env.OPENROUTER_API_KEY;else process.env.OPENROUTER_API_KEY=previous;}
+});
+
+/* ── Claude Agent SDK provider ─────────────────────────────────────────── */
+
+const CLAUDE_TEST_TOKEN = "sk-ant-oat01-testtoken0123456789abcdef";
+
+/**
+ * A stand-in for the Agent SDK's query(). Each call consumes the next turn
+ * description and records the params it was given, so a test can assert on
+ * the prompt, the options and the number of sessions started.
+ */
+function fakeClaude(turns) {
+  const seen = [];
+  const factory = () => (params) => {
+    const turn = turns[Math.min(seen.length, turns.length - 1)];
+    seen.push(params);
+    return (async function* () {
+      const session = turn.session ?? "session-1";
+      if (turn.throws) throw new Error(turn.throws);
+      yield { type: "system", subtype: "init", session_id: session };
+      yield {
+        type: "result",
+        subtype: turn.subtype ?? "success",
+        is_error: Boolean(turn.subtype && turn.subtype !== "success"),
+        session_id: session,
+        result: turn.result ?? JSON.stringify(turn.structured ?? { text: "", toolCalls: [] }),
+        ...(turn.structured === undefined ? {} : { structured_output: turn.structured }),
+        usage: turn.usage ?? {},
+        errors: turn.errors ?? [],
+      };
+    })();
+  };
+  return { factory, seen };
+}
+
+function withClaudeToken(token = CLAUDE_TEST_TOKEN) {
+  const previous = {
+    CLAUDE_CODE_OAUTH_TOKEN: process.env.CLAUDE_CODE_OAUTH_TOKEN,
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+  };
+  delete process.env.ANTHROPIC_API_KEY;
+  if (token === null) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  else process.env.CLAUDE_CODE_OAUTH_TOKEN = token;
+  return () => {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  };
+}
+
+test("Claude returns structured text and outer tool calls and keeps its session id", async () => {
+  const restore = withClaudeToken();
+  try {
+    const { factory, seen } = fakeClaude([{
+      session: "sess-abc",
+      structured: {
+        text: "Opened the file.",
+        toolCalls: [{ toolCallId: "call-1", toolName: "Shell", argumentsJson: '{"command":"ls"}' }],
+      },
+      usage: { input_tokens: 11, output_tokens: 5, cache_read_input_tokens: 2, cache_creation_input_tokens: 3 },
+    }]);
+    const result = await runClaude(
+      { claudeModel: "claude-opus-5" },
+      [user("List the workspace")],
+      [{ name: "Shell", parameters: { type: "object" } }],
+      factory,
+    );
+    assert.equal(result.text, "Opened the file.");
+    assert.deepEqual(result.toolCalls, [{ toolCallId: "call-1", toolName: "Shell", args: { command: "ls" } }]);
+    assert.equal(result.threadId, "sess-abc");
+    assert.equal(result.model, "claude-opus-5");
+    assert.deepEqual(result.usage, { inputTokens: 11, outputTokens: 5, cacheReadTokens: 2, cacheWriteTokens: 3 });
+    assert.equal(seen.length, 1);
+    // The prompt must name the real provider so the model never denies the router.
+    assert.match(seen[0].prompt, /active provider is Claude Agent SDK/);
+    assert.match(seen[0].prompt, /"Shell"/);
+    assert.equal(seen[0].options.resume, undefined);
+    assert.equal(seen[0].options.permissionMode, "bypassPermissions");
+    // A routed turn depends only on the Grok transcript, never on the Bot computer's files.
+    assert.deepEqual(seen[0].options.settingSources, []);
+    assert.equal(seen[0].options.outputFormat.type, "json_schema");
+    assert.equal(seen[0].options.env.CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_TEST_TOKEN);
+    assert.ok(seen[0].options.allowedTools.includes("Bash"));
+  } finally { restore(); }
+});
+
+test("Claude withholds every tool on the automatic greeting", async () => {
+  const restore = withClaudeToken();
+  try {
+    const { factory, seen } = fakeClaude([{
+      structured: { text: "Hi! What can I do for you?", toolCalls: [] },
+    }]);
+    const result = await runClaude(
+      {},
+      [{ role: "system", content: "Greet the user in their new Bot." }],
+      [{ name: "Shell", parameters: { type: "object" } }],
+      factory,
+    );
+    assert.equal(result.text, "Hi! What can I do for you?");
+    assert.deepEqual(result.toolCalls, []);
+    assert.ok(seen[0].options.disallowedTools.includes("Bash"));
+    assert.equal(seen[0].options.allowedTools, undefined);
+    assert.equal(seen[0].options.outputFormat.schema.properties.toolCalls.maxItems, 0);
+    assert.doesNotMatch(seen[0].prompt, /"Shell"/);
+  } finally { restore(); }
+});
+
+test("Claude discards tool calls a malformed greeting result smuggles past the schema", async () => {
+  const restore = withClaudeToken();
+  try {
+    const { factory } = fakeClaude([{
+      structured: { text: "", toolCalls: [{ toolCallId: "x", toolName: "Shell", argumentsJson: "{}" }] },
+    }]);
+    const result = await runClaude({}, [{ role: "system", content: "Greet the user in their new Bot." }], [], factory);
+    assert.deepEqual(result.toolCalls, []);
+    assert.equal(result.text, "Ready. What would you like me to work on?");
+  } finally { restore(); }
+});
+
+test("Claude resumes its session and starts a fresh one only when the old session is gone", async () => {
+  const restore = withClaudeToken();
+  try {
+    const resumed = fakeClaude([{ session: "sess-live", structured: { text: "Continued.", toolCalls: [] } }]);
+    const ok = await runClaude({ claudeSessionId: "sess-live" }, [user("Carry on")], [], resumed.factory);
+    assert.equal(ok.text, "Continued.");
+    assert.equal(resumed.seen[0].options.resume, "sess-live");
+    // A resumed turn sends only the newest slice of the transcript.
+    assert.match(resumed.seen[0].prompt, /Newest outer transcript update/);
+
+    const lost = fakeClaude([
+      { throws: "No conversation found with session ID: sess-dead" },
+      { session: "sess-new", structured: { text: "Restarted.", toolCalls: [] } },
+    ]);
+    const recovered = await runClaude({ claudeSessionId: "sess-dead" }, [user("Carry on")], [], lost.factory);
+    assert.equal(recovered.text, "Restarted.");
+    assert.equal(recovered.threadId, "sess-new");
+    assert.equal(lost.seen.length, 2);
+    assert.equal(lost.seen[1].options.resume, undefined);
+    assert.match(lost.seen[1].prompt, /Outer conversation \(oldest to newest\)/);
+  } finally { restore(); }
+});
+
+test("Claude retries once on an empty structured result without restarting the session", async () => {
+  const restore = withClaudeToken();
+  try {
+    const { factory, seen } = fakeClaude([
+      { session: "sess-1", structured: { text: "", toolCalls: [] }, usage: { input_tokens: 4, output_tokens: 1 } },
+      { session: "sess-1", structured: { text: "RECOVERED", toolCalls: [] }, usage: { input_tokens: 6, output_tokens: 2 } },
+    ]);
+    const result = await runClaude({}, [user("Finish the work")], [], factory);
+    assert.equal(result.text, "RECOVERED");
+    assert.equal(result.retriedEmpty, true);
+    assert.equal(seen.length, 2);
+    assert.equal(seen[1].options.resume, "sess-1");
+    assert.match(seen[1].prompt, /Do not repeat completed actions/);
+    assert.doesNotMatch(seen[1].prompt, /Finish the work/);
+    assert.equal(result.usage.inputTokens, 10);
+    assert.equal(result.usage.outputTokens, 3);
+  } finally { restore(); }
+});
+
+test("Claude surfaces a failed run as an error rather than an empty answer", async () => {
+  const restore = withClaudeToken();
+  try {
+    const { factory } = fakeClaude([{ subtype: "error_max_turns", errors: ["turn limit reached"] }]);
+    await assert.rejects(
+      runClaude({}, [user("Do the thing")], [], factory),
+      /Claude Agent SDK error_max_turns: turn limit reached/,
+    );
+  } finally { restore(); }
+});
+
+test("Claude falls back to the result text when the harness returns no structured object", async () => {
+  const restore = withClaudeToken();
+  try {
+    const { factory } = fakeClaude([{ result: JSON.stringify({ text: "From text", toolCalls: [] }) }]);
+    const result = await runClaude({}, [user("Answer")], [], factory);
+    assert.equal(result.text, "From text");
+  } finally { restore(); }
+});
+
+test("Claude reads its credential from the secrets store and picks the matching env var", async () => {
+  const restore = withClaudeToken(null);
+  const root = await mkdtemp(join(tmpdir(), "grokrouter-claude-secrets-"));
+  try {
+    const secretsPath = join(root, "box-secrets.json");
+    await writeFile(secretsPath, JSON.stringify({ secrets: { CLAUDE_CODE_OAUTH_TOKEN: CLAUDE_TEST_TOKEN } }));
+    const oauth = fakeClaude([{ structured: { text: "ok", toolCalls: [] } }]);
+    await runClaude({ claudeSecretsPath: secretsPath }, [user("Hi")], [], oauth.factory);
+    assert.equal(oauth.seen[0].options.env.CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_TEST_TOKEN);
+    assert.equal(oauth.seen[0].options.env.ANTHROPIC_API_KEY, undefined);
+
+    const apiKeyPath = join(root, "api-key.json");
+    const apiKey = "sk-ant-api03-testkey0123456789abcdef";
+    await writeFile(apiKeyPath, JSON.stringify({ secrets: { ANTHROPIC_API_KEY: apiKey } }));
+    const keyed = fakeClaude([{ structured: { text: "ok", toolCalls: [] } }]);
+    await runClaude({ claudeSecretsPath: apiKeyPath }, [user("Hi")], [], keyed.factory);
+    assert.equal(keyed.seen[0].options.env.ANTHROPIC_API_KEY, apiKey);
+    assert.equal(keyed.seen[0].options.env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+  } finally { restore(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("Claude refuses to run without a credential and never echoes a malformed one", async () => {
+  const restore = withClaudeToken(null);
+  const root = await mkdtemp(join(tmpdir(), "grokrouter-claude-nokey-"));
+  try {
+    const missing = fakeClaude([{ structured: { text: "never", toolCalls: [] } }]);
+    await assert.rejects(
+      runClaude({ claudeSecretsPath: join(root, "absent.json") }, [user("Hi")], [], missing.factory),
+      /Claude needs CLAUDE_CODE_OAUTH_TOKEN/,
+    );
+    assert.equal(missing.seen.length, 0);
+
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "not-a-real-credential";
+    await assert.rejects(runClaude({}, [user("Hi")], [], missing.factory), (error) => {
+      assert.match(error.message, /does not look like a valid sk-ant credential/);
+      assert.doesNotMatch(error.message, /not-a-real-credential/);
+      return true;
+    });
+  } finally { restore(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("Claude sends screenshots as image blocks inside the message", async () => {
+  const restore = withClaudeToken();
+  try {
+    const pixel = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const { factory, seen } = fakeClaude([{ structured: { text: "A red pixel.", toolCalls: [] } }]);
+    const result = await runClaude({}, [{
+      role: "user",
+      content: [
+        { type: "text", text: "What colour is this?" },
+        { type: "image", mimeType: "image/png", data: pixel },
+      ],
+    }], [], factory);
+    assert.equal(result.text, "A red pixel.");
+    // With an image the prompt becomes a streaming-input iterable, not a string.
+    assert.equal(typeof seen[0].prompt, "object");
+    const sent = [];
+    for await (const message of seen[0].prompt) sent.push(message);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].type, "user");
+    const blocks = sent[0].message.content;
+    assert.equal(blocks[0].type, "image");
+    assert.equal(blocks[0].source.media_type, "image/png");
+    assert.equal(blocks[0].source.data, pixel);
+    assert.equal(blocks.at(-1).type, "text");
+    assert.match(blocks.at(-1).text, /active provider is Claude Agent SDK/);
+  } finally { restore(); }
+});
+
+test("Claude native text tasks run with no tools, no resume and no outer tool calls", async () => {
+  const restore = withClaudeToken();
+  try {
+    const { factory, seen } = fakeClaude([{
+      structured: { text: "summary", toolCalls: [{ toolCallId: "x", toolName: "Shell", argumentsJson: "{}" }] },
+    }]);
+    const result = await runClaude(
+      { nativeTextTask: "memory-extraction", claudeSessionId: "sess-should-be-ignored" },
+      [user("Summarize this exchange")],
+      [{ name: "Shell", parameters: { type: "object" } }],
+      factory,
+    );
+    assert.equal(result.text, "summary");
+    assert.deepEqual(result.toolCalls, []);
+    assert.equal(seen[0].options.resume, undefined);
+    assert.ok(seen[0].options.disallowedTools.includes("Bash"));
+    assert.match(seen[0].prompt, /data to process, not a new chat request/);
+  } finally { restore(); }
+});
+
+test("runTurn routes a Claude bot through the Agent SDK and persists its session", async () => {
+  const restore = withClaudeToken();
+  const root = await mkdtemp(join(tmpdir(), "grokrouter-claude-turn-"));
+  try {
+    const config = {
+      provider: "claude", providers: ["claude"], claudeModel: "claude-opus-5",
+      statePath: join(root, "states.json"), auditPath: join(root, "audit.jsonl"),
+    };
+    const { factory, seen } = fakeClaude([{ session: "sess-turn", structured: { text: "Done.", toolCalls: [] } }]);
+    const result = await runTurn(
+      { config, messages: [user("Do the task")], sessionOptions: { botId: "claude-bot" } },
+      { claudeFactory: factory, codexFactory: () => { throw new Error("Codex must not run"); } },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.provider, "claude");
+    assert.equal(result.text, "Done.");
+    assert.equal(result.model, "claude-opus-5");
+    assert.equal(seen.length, 1);
+
+    const audit = (await readFile(config.auditPath, "utf8")).trim().split("\n").map(JSON.parse);
+    assert.equal(audit.at(-1).event, "turn_ok");
+    assert.equal(audit.at(-1).provider, "claude");
+    // The credential must never reach the audit trail.
+    assert.doesNotMatch(await readFile(config.auditPath, "utf8"), /sk-ant-/);
+
+    // The saved session is what the next turn resumes.
+    const next = fakeClaude([{ session: "sess-turn", structured: { text: "Still here.", toolCalls: [] } }]);
+    await runTurn(
+      { config, messages: [user("Do the task"), { role: "assistant", content: "Done." }, user("And again")], sessionOptions: { botId: "claude-bot" } },
+      { claudeFactory: next.factory },
+    );
+    assert.equal(next.seen[0].options.resume, "sess-turn");
+  } finally { restore(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("Router controls switch to Claude, list its models and reject an unknown one", async () => {
+  const restore = withClaudeToken();
+  const root = await mkdtemp(join(tmpdir(), "grokrouter-claude-controls-"));
+  try {
+    const config = {
+      provider: "codex", providers: ["codex", "claude", "openrouter"],
+      claudeModel: "claude-opus-5", claudeModels: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
+      statePath: join(root, "states.json"), auditPath: join(root, "audit.jsonl"),
+    };
+    const sessionOptions = { botId: "control-bot" };
+    const never = {
+      codexFactory: () => { throw new Error("Control reached Codex"); },
+      claudeFactory: () => { throw new Error("Control reached Claude"); },
+      fetchImpl: () => { throw new Error("Control reached OpenRouter"); },
+    };
+    const control = (text) => runTurn({ config, messages: [user(text)], sessionOptions }, never);
+
+    const switched = await control("/provider claude");
+    assert.equal(switched.provider, "claude");
+    assert.equal(switched.model, "claude-opus-5");
+    assert.match(switched.text, /Claude Agent SDK/);
+
+    const listed = await control("/models");
+    assert.match(listed.text, /Claude Agent SDK models:/);
+    assert.match(listed.text, /claude-sonnet-5/);
+
+    const aliased = await control("/model haiku");
+    assert.equal(aliased.model, "claude-haiku-4-5");
+
+    const unknown = await control("/model gpt-5.6-sol");
+    assert.match(unknown.text, /Unknown Claude model/);
+    assert.equal(unknown.model, "claude-haiku-4-5");
+
+    const doctor = await control("/router doctor");
+    assert.match(doctor.text, /Provider: Claude Agent SDK/);
+    assert.match(doctor.text, /Claude credential: subscription token configured/);
+    assert.match(doctor.text, /structured adapter/);
+    assert.doesNotMatch(doctor.text, /sk-ant-/);
+  } finally { restore(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("Claude is told the outer tools are real, so it bridges them instead of declining", async () => {
+  const restore = withClaudeToken();
+  try {
+    const { factory, seen } = fakeClaude([{
+      structured: {
+        text: "Taking the screenshot.",
+        toolCalls: [{ toolCallId: "c1", toolName: "TakeScreenshot", argumentsJson: '{"reason":"asked"}' }],
+      },
+    }]);
+    await runClaude({}, [user("Take a screenshot")], [{ name: "TakeScreenshot", parameters: { type: "object" } }], factory);
+    const prompt = seen[0].prompt;
+    // Live runs showed Claude answering "that tool is not available in this
+    // environment" when the prompt did not say these three things outright.
+    assert.match(prompt, /They are real and available to you right now/);
+    assert.match(prompt, /NOT in your own tool list/);
+    assert.match(prompt, /Never tell the user that a listed outer tool is unavailable/);
+  } finally { restore(); }
+});
+
+test("Claude can rely on the Bot computer's own login instead of a stored credential", async () => {
+  const restore = withClaudeToken(null);
+  const root = await mkdtemp(join(tmpdir(), "grokrouter-claude-hostlogin-"));
+  try {
+    const config = { claudeSecretsPath: join(root, "absent.json"), claudeUseHostLogin: true };
+    const { factory, seen } = fakeClaude([{ structured: { text: "ok", toolCalls: [] } }]);
+    const result = await runClaude(config, [user("Hi")], [], factory);
+    assert.equal(result.text, "ok");
+    // No credential is invented; the CLI keeps owning its own login.
+    assert.equal(seen[0].options.env.CLAUDE_CODE_OAUTH_TOKEN, undefined);
+    assert.equal(seen[0].options.env.ANTHROPIC_API_KEY, undefined);
+
+    const stateRoot = await mkdtemp(join(tmpdir(), "grokrouter-claude-hostlogin-doctor-"));
+    const doctor = await runTurn({
+      config: {
+        ...config, provider: "claude", providers: ["claude"],
+        statePath: join(stateRoot, "states.json"), auditPath: join(stateRoot, "audit.jsonl"),
+      },
+      messages: [user("/router doctor")],
+      sessionOptions: { botId: "hostlogin-bot" },
+    }, { claudeFactory: () => { throw new Error("Doctor must not reach Claude"); } });
+    assert.match(doctor.text, /Claude credential: using the Bot computer's own claude login/);
+    await rm(stateRoot, { recursive: true, force: true });
+  } finally { restore(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("Claude without any credential refuses before starting a session", async () => {
+  const restore = withClaudeToken(null);
+  const root = await mkdtemp(join(tmpdir(), "grokrouter-claude-nocred-"));
+  try {
+    const { factory, seen } = fakeClaude([{ structured: { text: "never", toolCalls: [] } }]);
+    await assert.rejects(
+      runClaude({ claudeSecretsPath: join(root, "absent.json") }, [user("Hi")], [], factory),
+      /claudeUseHostLogin/,
+    );
+    assert.equal(seen.length, 0);
+  } finally { restore(); await rm(root, { recursive: true, force: true }); }
 });

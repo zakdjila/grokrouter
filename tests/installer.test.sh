@@ -165,9 +165,17 @@ grep -q 'GROKROUTER_%s_PHASE_%s' "$PROJECT_ROOT/remote/install.sh"
 grep -q 'GROKROUTER_%s_INSTALL_FAILED_%s_%s' "$PROJECT_ROOT/remote/install.sh"
 grep -q -- '--fetch-retries=3' "$PROJECT_ROOT/remote/install.sh"
 grep -q -- '--fetch-timeout=30000' "$PROJECT_ROOT/remote/install.sh"
-grep -q 'Reusing the already verified pinned Codex runtime' "$PROJECT_ROOT/remote/install.sh"
+grep -q 'Reusing the already verified pinned provider runtimes' "$PROJECT_ROOT/remote/install.sh"
 grep -q 'OpenRouter-only setup needs no dependency download' "$PROJECT_ROOT/remote/install.sh"
 grep -q 'await import("@openai/codex-sdk")' "$PROJECT_ROOT/runtime/run-provider.mjs"
+grep -q 'await import("@anthropic-ai/claude-agent-sdk")' "$PROJECT_ROOT/runtime/run-provider.mjs"
+# The Claude credential must reach the runtime through the child env allowlist.
+grep -q 'CLAUDE_CODE_OAUTH_TOKEN' "$PROJECT_ROOT/patch/router_patch.py"
+# A Claude install must fail loudly rather than route to a missing SDK.
+grep -q 'MISSING_CLAUDE_SDK' "$PROJECT_ROOT/remote/install.sh"
+grep -q -- '--claude-model' "$PROJECT_ROOT/remote/install.sh"
+grep -q -- '--claude-model' "$PROJECT_ROOT/installer/GrokBotRouterInstaller.swift"
+grep -q 'isValidClaudeToken' "$PROJECT_ROOT/installer/GrokBotRouterInstaller.swift"
 grep -q '"X-Title": "GrokRouter"' "$PROJECT_ROOT/runtime/run-provider.mjs"
 ! grep -q 'Prompt Advisers\|promptadvisers.com' "$PROJECT_ROOT/runtime/run-provider.mjs"
 grep -q '<string>io.grokrouter.installer</string>' "$PROJECT_ROOT/installer/Info.plist"
@@ -182,6 +190,10 @@ grep -q '/home/box/sand-data/grokbot-router-backup/host-main.cjs.stock' "$PROJEC
 grep -q '/usr/local/bin/grokbot-router' "$PROJECT_ROOT/remote/install.sh"
 grep -q 'sudo -n ln -sfn' "$PROJECT_ROOT/remote/install.sh"
 grep -q '"@openai/codex-sdk": "0.151.0"' "$PROJECT_ROOT/runtime/package.json"
+grep -q '"@anthropic-ai/claude-agent-sdk": "0.3.269"' "$PROJECT_ROOT/runtime/package.json"
+# npm ci refuses a lock that does not already describe the pinned SDK.
+grep -q '"node_modules/@anthropic-ai/claude-agent-sdk"' "$PROJECT_ROOT/runtime/package-lock.json"
+grep -q '"node_modules/@anthropic-ai/claude-agent-sdk-linux-x64"' "$PROJECT_ROOT/runtime/package-lock.json"
 
 ARCHIVE="$(bash "$PROJECT_ROOT/scripts/build-payload.sh")"
 [[ -f "$ARCHIVE" ]]
@@ -358,7 +370,7 @@ bash "$PAYLOAD/remote/install.sh" \
   --providers codex,openrouter \
   --no-restart \
   >"$TEMPORARY/install-reuse.log"
-grep -q 'Reusing the already verified pinned Codex runtime' "$TEMPORARY/install-reuse.log"
+grep -q 'Reusing the already verified pinned provider runtimes' "$TEMPORARY/install-reuse.log"
 cmp "$TEMPORARY/pre-upgrade-audit" "$TEST_RUNTIME/audit.jsonl"
 node --input-type=module - "$TEST_RUNTIME" <<'NODESTATE'
 import assert from 'node:assert/strict';

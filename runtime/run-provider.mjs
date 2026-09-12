@@ -8,6 +8,7 @@ const MAX_INPUT_BYTES = 50 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_IMAGES_PER_TURN = 4;
 const MAX_TOOLS = 128;
+const DEFAULT_CLAUDE_MODEL = "claude-opus-5";
 const ROUTER_VERSION = "0.1.0-beta.47";
 const COMPLETED_TURN_TTL_MS = 15 * 60_000;
 const ACTIVE_TURN_TTL_MS = 15 * 60_000;
@@ -1595,6 +1596,297 @@ export async function runCodex(config, messages, tools, codexFactory = null) {
   };
 }
 
+/* ── Claude Agent SDK ───────────────────────────────────────────────────
+ *
+ * The third provider. Unlike OpenRouter, which reaches Claude as a plain
+ * chat completion, this runs the Claude Code harness inside the Bot
+ * computer: Claude gets its own Bash, file editing, and web tools in
+ * /workspace, exactly as Codex does, and the outer Grok tools still come
+ * back through the structured toolCalls bridge.
+ *
+ * Credentials are a Claude subscription OAuth token (`claude setup-token`)
+ * or an Anthropic API key, read from Grok Bot's Secrets store. They are
+ * handed to the child as an explicit env entry and never logged.
+ */
+
+function validClaudeCredential(value) {
+  return /^sk-ant-[A-Za-z0-9_-]{20,}$/.test(String(value || ""));
+}
+
+/** OAuth tokens bill a Claude subscription; API keys bill the console account. */
+function claudeCredentialEnvVar(value) {
+  return /^sk-ant-oat/.test(String(value || "")) ? "CLAUDE_CODE_OAUTH_TOKEN" : "ANTHROPIC_API_KEY";
+}
+
+async function persistedClaudeCredential(config) {
+  const inheritedNames = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"];
+  for (const name of inheritedNames) {
+    const value = process.env[name]?.trim();
+    if (!value) continue;
+    if (!validClaudeCredential(value)) {
+      throw new Error(`${name} is present but does not look like a valid sk-ant credential`);
+    }
+    return { name: claudeCredentialEnvVar(value), value };
+  }
+  const candidates = [
+    config.claudeSecretsPath,
+    config.openRouterSecretsPath,
+    "/home/box/sand-data/box-secrets.json",
+  ].filter(Boolean);
+  for (const pathname of candidates) {
+    let parsed;
+    try {
+      parsed = JSON.parse(await readFile(pathname, "utf8"));
+    } catch {
+      // Missing or unreadable stores are skipped without logging secret material.
+      continue;
+    }
+    for (const name of inheritedNames) {
+      const value = parsed?.secrets?.[name]?.trim();
+      if (!value) continue;
+      if (!validClaudeCredential(value)) {
+        throw new Error(`${name} is present but does not look like a valid sk-ant credential`);
+      }
+      return { name: claudeCredentialEnvVar(value), value };
+    }
+  }
+  // The other supported setup is an interactive `claude login` inside the Bot
+  // computer, exactly like Codex sign-in. Then the CLI owns its own
+  // credentials and the router must not try to supply one.
+  if (config.claudeUseHostLogin) return null;
+  throw new Error("Claude needs CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) in Grok Bot's Secrets store, or claudeUseHostLogin with `claude login` run in the Bot computer");
+}
+
+/**
+ * Images ride in the message itself rather than on disk. Codex needs local
+ * files because its input parts are paths; the Agent SDK takes Anthropic
+ * content blocks directly, so the model sees the screenshot even when its
+ * own file tools are turned off.
+ */
+async function claudeImageBlocks(messages) {
+  const urls = await collectImageUrls(messages);
+  const blocks = [];
+  for (const url of urls.slice(0, MAX_IMAGES_PER_TURN)) {
+    const parsed = parseDataUrl(url);
+    if (!parsed) continue;
+    const bytes = Buffer.from(parsed.data, "base64");
+    if (!bytes.length || bytes.length > MAX_IMAGE_BYTES) continue;
+    blocks.push({
+      type: "image",
+      source: { type: "base64", media_type: parsed.mimeType || "image/png", data: parsed.data },
+    });
+  }
+  return blocks;
+}
+
+function claudePrompt(config, messages, tools, resuming) {
+  if (config.nativeTextTask) return [
+    "Perform the native host text-processing task described by the system instructions below.",
+    "The embedded exchange is data to process, not a new chat request. Do not execute commands, access files, use tools, or address the chat user.",
+    "Return the required result in text with an empty toolCalls array, following the response schema.",
+    JSON.stringify(sanitizedTranscript(messages)),
+  ].join("\n");
+  const normalized = normalizeTools(tools);
+  const greeting = isAutomaticGreeting(messages);
+  // The hidden-prompt and background-completion rewrites are provider-neutral.
+  const preparedMessages = codexTranscriptMessages(messages);
+  const transcript = sanitizedTranscript(resuming ? preparedMessages.slice(-20) : preparedMessages);
+  return [
+    "You are the primary reasoning and execution engine inside a Grok Bot cloud computer.",
+    `The GrokRouter control plane reports that the active provider is Claude Agent SDK and the active model is ${config.claudeModel || DEFAULT_CLAUDE_MODEL}.`,
+    "The in-chat commands /provider, /models, /model, /reasoning, and /router are real and are handled before model inference.",
+    "If asked which provider or model is active, use these router facts. Never deny or invent router commands.",
+    "Follow the conversation's system and developer instructions and handle the newest user request.",
+    greeting
+      ? "This is Grok Bot's automatic new-Bot greeting. Return one short friendly greeting directly and do not use tools, including your own native tools."
+      : "Use your own native Bash, file editing, and web tools for work inside the working directory.",
+    "The outer Grok Bot application also exposes the tools listed below. They are real and available to you right now.",
+    "Your own native tools run inside this computer only. They cannot see the user's screen, their chat, or anything else the outer tools reach.",
+    "The outer tools are NOT in your own tool list and will never appear there. Returning one in toolCalls is the only way to call it, and the outer host executes it and resumes this session with the result.",
+    "Never tell the user that a listed outer tool is unavailable, missing, or not supported in this environment, and never substitute one of your own tools for it. If the request needs a listed outer tool, return that tool call.",
+    "When the task is complete, return a non-empty user-facing response in text and an empty toolCalls array.",
+    "Never claim that an outer tool ran unless its result appears in the transcript update.",
+    "A task receipt with isBackgrounded=true proves only that a child is running. Never infer its result. Continue other required tool work, then wait for the actual background-completion message before delivering the result.",
+    "If the entire request is a standalone literal or exact-text reply, answer directly and return no outer tool call. A final-format instruction does not remove prerequisite tool work or delegation; complete that work before formatting the answer.",
+    "Return only the structured object required by the response schema.",
+    "",
+    `Outer Grok tool schemas (${normalized.length}):`,
+    JSON.stringify(normalized),
+    "",
+    resuming ? "Newest outer transcript update:" : "Outer conversation (oldest to newest):",
+    JSON.stringify(transcript),
+  ].join("\n");
+}
+
+/** The router's own effort vocabulary, mapped onto the SDK's. */
+function claudeEffort(reasoning) {
+  if (reasoning === "minimal") return "low";
+  return ["low", "medium", "high", "xhigh", "max"].includes(reasoning) ? reasoning : "high";
+}
+
+/** Claude's own tools, withheld for greetings and native maintenance text tasks. */
+const CLAUDE_NATIVE_TOOLS = [
+  "Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch", "TodoWrite", "Task", "NotebookEdit",
+];
+
+function claudeQueryOptions(config, credential, { greeting, sessionId }) {
+  const bare = greeting || config.nativeTextTask;
+  return {
+    model: config.claudeModel || DEFAULT_CLAUDE_MODEL,
+    cwd: config.workingDirectory || "/workspace",
+    effort: claudeEffort(config.claudeReasoning),
+    // Grok owns the outer permission boundary and the Bot computer is
+    // already the sandbox, so the inner harness does not prompt. This
+    // mirrors the Codex path's approvalPolicy "never".
+    permissionMode: "bypassPermissions",
+    ...(bare ? { disallowedTools: CLAUDE_NATIVE_TOOLS } : { allowedTools: CLAUDE_NATIVE_TOOLS }),
+    // Never inherit CLAUDE.md, project settings or user settings from the
+    // Bot computer: a routed turn must depend only on the Grok transcript.
+    settingSources: [],
+    outputFormat: { type: "json_schema", schema: codexOutputSchema(!bare) },
+    maxTurns: Number(config.claudeMaxTurns) > 0 ? Number(config.claudeMaxTurns) : 40,
+    ...(sessionId ? { resume: sessionId } : {}),
+    env: credential ? { ...process.env, [credential.name]: credential.value } : { ...process.env },
+    ...(config.claudePathOverride ? { pathToClaudeCodeExecutable: config.claudePathOverride } : {}),
+  };
+}
+
+async function createClaudeQuery() {
+  const { query } = await import("@anthropic-ai/claude-agent-sdk");
+  return query;
+}
+
+/** One yielded user message carrying the prompt plus any screenshots. */
+function claudeStreamingInput(prompt, imageBlocks) {
+  return (async function* () {
+    yield {
+      type: "user",
+      parent_tool_use_id: null,
+      session_id: "",
+      message: { role: "user", content: [...imageBlocks, { type: "text", text: prompt }] },
+    };
+  })();
+}
+
+/** Drain one query() call down to its terminal result message. */
+async function claudeResult(query, prompt, options, imageBlocks) {
+  const stderr = [];
+  const run = query({
+    prompt: imageBlocks.length ? claudeStreamingInput(prompt, imageBlocks) : prompt,
+    options: { ...options, stderr: (chunk) => { if (stderr.length < 40) stderr.push(String(chunk)); } },
+  });
+  let result = null;
+  let sessionId = options.resume || null;
+  for await (const message of run) {
+    if (message?.type === "system" && message.subtype === "init" && message.session_id) {
+      sessionId = message.session_id;
+    }
+    if (message?.type === "result") result = message;
+  }
+  if (!result) {
+    const detail = stderr.join("").trim();
+    throw new Error(`Claude Agent SDK ended without a result${detail ? `: ${redactDiagnostic(detail, 300)}` : ""}`);
+  }
+  if (result.subtype !== "success") {
+    const errors = Array.isArray(result.errors) && result.errors.length
+      ? result.errors.join("; ")
+      : stderr.join("").trim();
+    throw new Error(`Claude Agent SDK ${result.subtype}${errors ? `: ${redactDiagnostic(errors, 300)}` : ""}`);
+  }
+  return { result, sessionId: result.session_id || sessionId };
+}
+
+/**
+ * The SDK returns the schema-validated object on `structured_output`, and
+ * the same JSON as text on `result`. Prefer the parsed object and fall back
+ * to the text so a harness change cannot silently blank a turn.
+ */
+function parseClaudeResult(result) {
+  const structured = result?.structured_output;
+  if (structured && typeof structured === "object") {
+    return parseCodexResult(JSON.stringify(structured));
+  }
+  return parseCodexResult(result?.result ?? "");
+}
+
+export async function runClaude(config, messages, tools, claudeFactory = null) {
+  // Installations without Claude never load or install the Agent SDK, the
+  // same way the Codex SDK stays behind the Codex execution path.
+  const credential = await persistedClaudeCredential(config);
+  const query = claudeFactory ? claudeFactory() : await createClaudeQuery();
+  const greeting = isAutomaticGreeting(messages);
+  const offeredTools = greeting || config.nativeTextTask ? [] : tools;
+  const resuming = !config.nativeTextTask && Boolean(config.claudeSessionId);
+  const imageBlocks = config.nativeTextTask ? [] : await claudeImageBlocks(messages);
+
+  const options = claudeQueryOptions(config, credential, {
+    greeting,
+    sessionId: resuming ? config.claudeSessionId : null,
+  });
+  let outcome;
+  try {
+    outcome = await claudeResult(query, claudePrompt(config, messages, offeredTools, resuming), options, imageBlocks);
+  } catch (error) {
+    if (!resuming) throw error;
+    // A resumed session can be gone from the Bot computer's session store.
+    // Fall back to a fresh session with the full transcript rather than
+    // failing a turn the user is waiting on.
+    const fresh = claudeQueryOptions(config, credential, { greeting, sessionId: null });
+    outcome = await claudeResult(query, claudePrompt(config, messages, offeredTools, false), fresh, imageBlocks);
+  }
+  let parsed = parseClaudeResult(outcome.result);
+  if (config.nativeTextTask) parsed.toolCalls = [];
+  // The schema forbids greeting tools. Keep that boundary even if the
+  // harness returns a malformed structured result instead of honoring it.
+  if (greeting && parsed.toolCalls.length) {
+    parsed = { text: "Ready. What would you like me to work on?", toolCalls: [] };
+  }
+  let usage = normalizeUsage(outcome.result.usage);
+  let retriedEmpty = false;
+  if (!parsed.text && !parsed.toolCalls.length) {
+    retriedEmpty = true;
+    // Stay on the same session so completed native actions are not replayed.
+    const retryOptions = claudeQueryOptions(config, credential, { greeting, sessionId: outcome.sessionId });
+    const retry = await claudeResult(
+      query,
+      config.nativeTextTask
+        ? "Return the text required by the original host system instructions with an empty toolCalls array. Do not use tools or address the chat user."
+        : greeting
+        ? "Return one short friendly greeting in text with an empty toolCalls array. Do not use any tools."
+        : "Your previous turn returned no answer or outer tool call. Continue from the actual results already in this session. Do not repeat completed actions or claim a child launched without its real result. Return the required structured object with either the next necessary outer tool call or a non-empty final text answer.",
+      retryOptions,
+      [],
+    );
+    outcome = { result: retry.result, sessionId: retry.sessionId || outcome.sessionId };
+    parsed = parseClaudeResult(retry.result);
+    if (config.nativeTextTask) parsed.toolCalls = [];
+    if (greeting && parsed.toolCalls.length) {
+      parsed = { text: "Ready. What would you like me to work on?", toolCalls: [] };
+    }
+    const retriedUsage = normalizeUsage(retry.result.usage);
+    usage = Object.fromEntries(Object.entries(usage).map(([key, value]) => [key, value + retriedUsage[key]]));
+  }
+  return {
+    ...parsed,
+    usage,
+    model: config.claudeModel || DEFAULT_CLAUDE_MODEL,
+    threadId: outcome.sessionId,
+    ...(!parsed.text && !parsed.toolCalls.length ? { emptyResponse: true } : {}),
+    ...(retriedEmpty ? { retriedEmpty: true } : {}),
+  };
+}
+
+/** One call shape for all three providers, so every dispatch site stays identical. */
+function providerRunner(provider, dependencies = {}) {
+  if (provider === "openrouter") {
+    return (config, messages, tools) => runOpenRouter(config, messages, tools, dependencies.fetchImpl);
+  }
+  if (provider === "claude") {
+    return (config, messages, tools) => runClaude(config, messages, tools, dependencies.claudeFactory);
+  }
+  return (config, messages, tools) => runCodex(config, messages, tools, dependencies.codexFactory);
+}
+
 function stateDirectory(config) {
   if (config.stateDirectory) return config.stateDirectory;
   const legacyPath = config.statePath || join(runtimeDirectory, "conversation-states.json");
@@ -1881,12 +2173,8 @@ async function stateForTurn(config, messages, sessionOptions) {
       conversationKey: key,
       sessionId: key.slice(0, 24),
       provider,
-      model: provider === "openrouter"
-        ? config.openRouterModel || "anthropic/claude-sonnet-4.6"
-        : config.codexModel || "gpt-5.6-sol",
-      reasoning: provider === "openrouter"
-        ? config.openRouterReasoning || "medium"
-        : config.codexReasoning || "medium",
+      model: defaultModel(config, provider),
+      reasoning: defaultReasoning(config, provider),
       threadId: null,
       threadEpoch: 0,
       tools: [],
@@ -1991,18 +2279,28 @@ function isChannelControlFollowOn(sessionOptions) {
     && Boolean(channelControlKey(sessionOptions));
 }
 
+const PROVIDER_LABELS = { openrouter: "OpenRouter", claude: "Claude Agent SDK", codex: "Codex SDK" };
+
 function providerLabel(provider) {
-  return provider === "openrouter" ? "OpenRouter" : "Codex SDK";
+  return PROVIDER_LABELS[provider] || PROVIDER_LABELS.codex;
 }
 
 function defaultModel(config, provider) {
-  return provider === "openrouter"
-    ? config.openRouterModel || "anthropic/claude-sonnet-4.6"
-    : config.codexModel || "gpt-5.6-sol";
+  if (provider === "openrouter") return config.openRouterModel || "anthropic/claude-sonnet-4.6";
+  if (provider === "claude") return config.claudeModel || DEFAULT_CLAUDE_MODEL;
+  return config.codexModel || "gpt-5.6-sol";
+}
+
+function defaultReasoning(config, provider) {
+  if (provider === "openrouter") return config.openRouterReasoning || "medium";
+  if (provider === "claude") return config.claudeReasoning || "high";
+  return config.codexReasoning || "medium";
 }
 
 function configuredModels(config, provider) {
-  const models = provider === "openrouter" ? config.openRouterModels : config.codexModels;
+  const models = provider === "openrouter"
+    ? config.openRouterModels
+    : provider === "claude" ? config.claudeModels : config.codexModels;
   return [...new Set([
     defaultModel(config, provider),
     ...(Array.isArray(models) ? models.filter((model) => typeof model === "string") : []),
@@ -2010,7 +2308,9 @@ function configuredModels(config, provider) {
 }
 
 function configuredAliases(config, provider) {
-  const raw = provider === "openrouter" ? config?.openRouterAliases : config?.codexAliases;
+  const raw = provider === "openrouter"
+    ? config?.openRouterAliases
+    : provider === "claude" ? config?.claudeAliases : config?.codexAliases;
   const out = {};
   if (raw && typeof raw === "object" && !Array.isArray(raw)) {
     for (const [alias, model] of Object.entries(raw)) {
@@ -2022,7 +2322,16 @@ function configuredAliases(config, provider) {
   return out;
 }
 
+const CLAUDE_BUILTIN_ALIASES = {
+  opus: "claude-opus-5",
+  sonnet: "claude-sonnet-5",
+  haiku: "claude-haiku-4-5",
+  fable: "claude-fable-5-1",
+  claude: "claude-opus-5",
+};
+
 function modelAliases(provider, config) {
+  if (provider === "claude") return { ...CLAUDE_BUILTIN_ALIASES, ...configuredAliases(config, provider) };
   const builtIn = provider === "openrouter"
     ? {
       claude: "anthropic/claude-sonnet-4.6",
@@ -2058,7 +2367,28 @@ async function doctorText(config, state) {
       checks.push("Codex CLI: missing");
     }
   }
-  checks.push(`Grok tools: bridged on demand (${state.provider === "codex" ? "structured adapter" : "native function calls"})`);
+  if (state.provider === "claude" || (config.providers || []).includes("claude")) {
+    try {
+      const credential = await persistedClaudeCredential(config);
+      checks.push(credential === null
+        ? "Claude credential: using the Bot computer's own claude login"
+        : credential.name === "CLAUDE_CODE_OAUTH_TOKEN"
+        ? "Claude credential: subscription token configured"
+        : "Claude credential: Anthropic API key configured");
+    } catch (error) {
+      checks.push(String(error?.message || error).includes("present but")
+        ? "Claude credential: present but invalid shape"
+        : "Claude credential: not configured");
+    }
+    const sdk = join(runtimeDirectory, "node_modules", "@anthropic-ai", "claude-agent-sdk", "sdk.mjs");
+    try {
+      await stat(sdk);
+      checks.push("Claude Agent SDK: installed");
+    } catch {
+      checks.push("Claude Agent SDK: missing");
+    }
+  }
+  checks.push(`Grok tools: bridged on demand (${state.provider === "openrouter" ? "native function calls" : "structured adapter"})`);
   checks.push("Run a real computer and sub-agent parity test before treating those capabilities as verified for a model.");
   return checks.join("\n");
 }
@@ -2087,7 +2417,7 @@ async function controlResult(config, key, state, input) {
   if (command === "/router help" || command === "/providers") {
     return result([
       "GrokRouter controls:",
-      "• /provider codex|openrouter — switch this bot",
+      "• /provider codex|claude|openrouter — switch this bot",
       "• /provider — show active provider",
       "• /models — list configured models",
       "• /model <id> — switch this bot's model",
@@ -2110,16 +2440,14 @@ async function controlResult(config, key, state, input) {
     });
     return result("Provider thread reset. The Grok transcript remains available and will seed the next turn.");
   }
-  const providerMatch = normalized.match(/^\/(?:provider|router)\s+(codex|openrouter)$/i);
+  const providerMatch = normalized.match(/^\/(?:provider|router)\s+(codex|claude|openrouter)$/i);
   if (providerMatch) {
     const provider = providerMatch[1].toLowerCase();
     const allowed = Array.isArray(config.providers) ? config.providers : ["codex"];
     if (!allowed.includes(provider)) return result(`Provider “${provider}” is not enabled. Available: ${allowed.join(", ")}.`);
     const previous = `${providerLabel(state.provider)} (${state.model})`;
     const model = defaultModel(config, provider);
-    const reasoning = provider === "openrouter"
-      ? config.openRouterReasoning || "medium"
-      : config.codexReasoning || "medium";
+    const reasoning = defaultReasoning(config, provider);
     await persist({
       provider,
       model,
@@ -2152,6 +2480,9 @@ async function controlResult(config, key, state, input) {
     const model = modelAliases(state.provider, config)[requested.toLowerCase()] || requested;
     if (state.provider === "codex" && !configuredModels(config, "codex").includes(model)) {
       return result(`Unknown Codex model “${requested}”. Use /models to see the supported models.`);
+    }
+    if (state.provider === "claude" && !configuredModels(config, "claude").includes(model)) {
+      return result(`Unknown Claude model “${requested}”. Use /models to see the supported models.`);
     }
     if (state.provider === "openrouter" && !/^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._:+-]*$/i.test(model)) {
       return result(`Invalid OpenRouter model ID “${requested}”. Use vendor/model format.`);
@@ -2224,17 +2555,16 @@ export async function runTurn(input, dependencies = {}) {
     ? sessionOptions.grokBotRouterTextTask : "";
   if (nativeTextTask) {
     const taskConfig = {
-      ...config, nativeTextTask, codexThreadId: null,
+      ...config, nativeTextTask, codexThreadId: null, claudeSessionId: null,
       codexModel: state.model, codexReasoning: state.reasoning,
+      claudeModel: state.model, claudeReasoning: state.reasoning,
       openRouterModel: state.model, openRouterReasoning: state.reasoning,
       adapterSessionId: `${state.sessionId}:${nativeTextTask}`,
     };
     const receipt = { task: nativeTextTask, sessionId: state.sessionId, provider: state.provider, model: state.model, toolNames: [] };
     await appendAudit(config, { event: "native_text_task_start", ...receipt });
     try {
-      const output = state.provider === "openrouter"
-        ? await runOpenRouter(taskConfig, messages, [], dependencies.fetchImpl)
-        : await runCodex(taskConfig, messages, [], dependencies.codexFactory);
+      const output = await providerRunner(state.provider, dependencies)(taskConfig, messages, []);
       if (output.emptyResponse) throw new Error("Native text task returned an empty response after one retry");
       await appendAudit(config, { event: "native_text_task_ok", ...receipt });
       // A helper never resumes or replaces the Bot's conversation thread,
@@ -2403,6 +2733,9 @@ export async function runTurn(input, dependencies = {}) {
     codexModel: state.model,
     codexReasoning: state.reasoning,
     codexThreadId: state.threadId,
+    claudeModel: state.model,
+    claudeReasoning: state.reasoning,
+    claudeSessionId: state.threadId,
     openRouterModel: state.model,
     openRouterReasoning: state.reasoning,
     adapterSessionId: state.sessionId,
@@ -2432,9 +2765,7 @@ export async function runTurn(input, dependencies = {}) {
   });
   let result;
   try {
-    result = state.provider === "openrouter"
-      ? await runOpenRouter(turnConfig, messages, effectiveTools, dependencies.fetchImpl)
-      : await runCodex(turnConfig, messages, effectiveTools, dependencies.codexFactory);
+    result = await providerRunner(state.provider, dependencies)(turnConfig, messages, effectiveTools);
     if (result.emptyResponse) {
       const completion = latestAutomationCompletion(messages);
       if (pendingBackgroundIds.length) {
@@ -2442,7 +2773,7 @@ export async function runTurn(input, dependencies = {}) {
       } else if (automationContinuation && completion?.text) {
         result = { ...result, text: completion.text, emptyResponse: false, emptyRecovery: "automation-completion" };
       } else {
-        throw new Error(`${state.provider === "codex" ? "Codex SDK" : "OpenRouter"} returned an empty response after one retry`);
+        throw new Error(`${providerLabel(state.provider)} returned an empty response after one retry`);
       }
     }
     result.toolCalls = rewriteHostToolCallIds(result.toolCalls);

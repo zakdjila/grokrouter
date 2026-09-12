@@ -8,11 +8,14 @@ INSTALL_PARENT="/home/box/sand-data"
 GROK_VERSION="0.30.0"
 DEFAULT_PROVIDER="codex"
 CODEX_MODEL="gpt-5.6-sol"
+CLAUDE_MODEL="claude-opus-5"
 OPENROUTER_MODEL="anthropic/claude-sonnet-4.6"
-ENABLED_PROVIDERS="codex,openrouter"
+ENABLED_PROVIDERS="codex,claude,openrouter"
 PROVIDER_EXPLICIT=0
 PROVIDERS_EXPLICIT=0
 CODEX_MODEL_EXPLICIT=0
+CLAUDE_MODEL_EXPLICIT=0
+CLAUDE_HOST_LOGIN=0
 OPENROUTER_MODEL_EXPLICIT=0
 START_WATCHDOG=1
 GROK_SKILLS_ROOT="${ROUTER_GROK_SKILLS_ROOT:-/home/box/.grok/skills}"
@@ -52,9 +55,11 @@ usage() {
     "" \
     "Usage: install.sh [options]" \
     "  --grok-version VERSION       Exact desktop version verified by the installer" \
-    "  --provider codex|openrouter" \
-    "  --providers codex|openrouter|codex,openrouter" \
+    "  --provider codex|claude|openrouter" \
+    "  --providers comma-separated list of codex, claude, openrouter" \
     "  --codex-model MODEL" \
+    "  --claude-model MODEL" \
+    "  --claude-host-login          Use a `claude login` run inside the Bot computer" \
     "  --openrouter-model vendor/model" \
     "  --install-root PATH          Development/testing only" \
     "  --no-restart                 Do not restart the Grok host"
@@ -76,6 +81,15 @@ while [[ $# -gt 0 ]]; do
       ENABLED_PROVIDERS="${2:?missing providers}"
       PROVIDERS_EXPLICIT=1
       shift 2
+      ;;
+    --claude-model)
+      CLAUDE_MODEL="${2:?missing Claude model}"
+      CLAUDE_MODEL_EXPLICIT=1
+      shift 2
+      ;;
+    --claude-host-login)
+      CLAUDE_HOST_LOGIN=1
+      shift
       ;;
     --codex-model)
       CODEX_MODEL="${2:?missing Codex model}"
@@ -108,14 +122,40 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$DEFAULT_PROVIDER" != "codex" && "$DEFAULT_PROVIDER" != "openrouter" ]]; then
-  fail_install "INVALID_PROVIDER" "--provider must be codex or openrouter"
+if [[ "$DEFAULT_PROVIDER" != "codex" && "$DEFAULT_PROVIDER" != "claude" && "$DEFAULT_PROVIDER" != "openrouter" ]]; then
+  fail_install "INVALID_PROVIDER" "--provider must be codex, claude or openrouter"
 fi
 if [[ ! "$OPENROUTER_MODEL" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._:+-]+$ ]]; then
   fail_install "INVALID_OPENROUTER_MODEL" "--openrouter-model must use vendor/model format"
 fi
-if [[ "$ENABLED_PROVIDERS" != "codex" && "$ENABLED_PROVIDERS" != "openrouter" && "$ENABLED_PROVIDERS" != "codex,openrouter" && "$ENABLED_PROVIDERS" != "openrouter,codex" ]]; then
-  fail_install "INVALID_PROVIDERS" "--providers must be codex, openrouter, or codex,openrouter"
+if [[ ! "$CLAUDE_MODEL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  fail_install "INVALID_CLAUDE_MODEL" "--claude-model must be a plain model id such as claude-opus-5"
+fi
+# Any combination of the three, each named at most once.
+seen_providers=""
+IFS=, read -r -a requested_providers <<< "$ENABLED_PROVIDERS"
+if [[ ${#requested_providers[@]} -eq 0 ]]; then
+  fail_install "INVALID_PROVIDERS" "--providers must name at least one of codex, claude, openrouter"
+fi
+for requested_provider in "${requested_providers[@]}"; do
+  case "$requested_provider" in
+    codex|claude|openrouter) ;;
+    *) fail_install "INVALID_PROVIDERS" "--providers must only contain codex, claude or openrouter" ;;
+  esac
+  if [[ ",$seen_providers," == *",$requested_provider,"* ]]; then
+    fail_install "INVALID_PROVIDERS" "--providers named $requested_provider more than once"
+  fi
+  seen_providers="${seen_providers:+$seen_providers,}$requested_provider"
+done
+ENABLED_PROVIDERS="$seen_providers"
+if [[ ",$ENABLED_PROVIDERS," != *",$DEFAULT_PROVIDER,"* ]]; then
+  # Naming only --providers is how a single-provider install has always been
+  # requested, so adopt its first entry. Only a contradiction between two
+  # explicit flags is an error.
+  if [[ "$PROVIDER_EXPLICIT" == "1" ]]; then
+    fail_install "INVALID_PROVIDER" "--provider $DEFAULT_PROVIDER is not in --providers $ENABLED_PROVIDERS"
+  fi
+  DEFAULT_PROVIDER="${ENABLED_PROVIDERS%%,*}"
 fi
 
 emit_phase "PREFLIGHT"
@@ -211,6 +251,9 @@ ROUTER_PROVIDERS="$ENABLED_PROVIDERS" \
 ROUTER_PROVIDERS_EXPLICIT="$PROVIDERS_EXPLICIT" \
 ROUTER_CODEX_MODEL="$CODEX_MODEL" \
 ROUTER_CODEX_MODEL_EXPLICIT="$CODEX_MODEL_EXPLICIT" \
+ROUTER_CLAUDE_MODEL="$CLAUDE_MODEL" \
+ROUTER_CLAUDE_MODEL_EXPLICIT="$CLAUDE_MODEL_EXPLICIT" \
+ROUTER_CLAUDE_HOST_LOGIN="$CLAUDE_HOST_LOGIN" \
 ROUTER_OPENROUTER_MODEL="$OPENROUTER_MODEL" \
 ROUTER_OPENROUTER_MODEL_EXPLICIT="$OPENROUTER_MODEL_EXPLICIT" \
 python3 - <<'PY'
@@ -228,18 +271,22 @@ defaults = json.loads(defaults_path.read_text())
 config["grokBotVersion"] = os.environ["ROUTER_GROK_VERSION"]
 install_root = os.environ["ROUTER_INSTALL_ROOT"]
 provider = os.environ["ROUTER_PROVIDER"]
-if os.environ["ROUTER_PROVIDER_EXPLICIT"] != "1" and config.get("provider") in {"codex", "openrouter"}:
+KNOWN_PROVIDERS = {"codex", "claude", "openrouter"}
+if os.environ["ROUTER_PROVIDER_EXPLICIT"] != "1" and config.get("provider") in KNOWN_PROVIDERS:
     provider = config["provider"]
 providers = list(dict.fromkeys(os.environ["ROUTER_PROVIDERS"].split(",")))
 if os.environ["ROUTER_PROVIDERS_EXPLICIT"] != "1":
     existing = config.get("providers")
-    if isinstance(existing, list) and existing and all(item in {"codex", "openrouter"} for item in existing):
+    if isinstance(existing, list) and existing and all(item in KNOWN_PROVIDERS for item in existing):
         providers = list(dict.fromkeys(existing))
 if provider not in providers:
     providers.insert(0, provider)
 codex_model = os.environ["ROUTER_CODEX_MODEL"]
 if os.environ["ROUTER_CODEX_MODEL_EXPLICIT"] != "1" and isinstance(config.get("codexModel"), str):
     codex_model = config["codexModel"]
+claude_model = os.environ["ROUTER_CLAUDE_MODEL"]
+if os.environ["ROUTER_CLAUDE_MODEL_EXPLICIT"] != "1" and isinstance(config.get("claudeModel"), str):
+    claude_model = config["claudeModel"]
 openrouter_model = os.environ["ROUTER_OPENROUTER_MODEL"]
 if os.environ["ROUTER_OPENROUTER_MODEL_EXPLICIT"] != "1" and isinstance(config.get("openRouterModel"), str):
     openrouter_model = config["openRouterModel"]
@@ -249,8 +296,12 @@ config.update({
     "provider": provider,
     "providers": providers,
     "codexModel": codex_model,
+    "claudeModel": claude_model,
     "openRouterModel": openrouter_model,
     "codexModels": defaults.get("codexModels", []),
+    "claudeModels": defaults.get("claudeModels", []),
+    "claudeMaxTurns": config.get("claudeMaxTurns", defaults.get("claudeMaxTurns", 40)),
+    "claudeUseHostLogin": os.environ["ROUTER_CLAUDE_HOST_LOGIN"] == "1" or bool(config.get("claudeUseHostLogin")),
     "openRouterModels": defaults.get("openRouterModels", []),
     "runnerPath": f"{install_root}/run-provider.mjs",
     "nodePath": "/usr/bin/node",
@@ -264,13 +315,19 @@ PY
 DEFAULT_PROVIDER="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["provider"])' "$STAGE_ROOT/provider.json")"
 ENABLED_PROVIDERS="$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1]))["providers"]))' "$STAGE_ROOT/provider.json")"
 CODEX_MODEL="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["codexModel"])' "$STAGE_ROOT/provider.json")"
+CLAUDE_MODEL="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["claudeModel"])' "$STAGE_ROOT/provider.json")"
 OPENROUTER_MODEL="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["openRouterModel"])' "$STAGE_ROOT/provider.json")"
 
 emit_phase "INSTALL_DEPENDENCIES"
-if [[ "$ENABLED_PROVIDERS" == *codex* ]]; then
+needs_codex=0
+needs_claude=0
+[[ ",$ENABLED_PROVIDERS," == *,codex,* ]] && needs_codex=1
+[[ ",$ENABLED_PROVIDERS," == *,claude,* ]] && needs_claude=1
+if [[ "$needs_codex" == "1" || "$needs_claude" == "1" ]]; then
   dependencies_reused=0
+  platform_slug="$(node -p 'process.platform + "-" + process.arch')"
   codex_native_package=""
-  case "$(node -p 'process.platform + "-" + process.arch')" in
+  case "$platform_slug" in
     linux-x64) codex_native_package="codex-linux-x64" ;;
     linux-arm64) codex_native_package="codex-linux-arm64" ;;
     darwin-x64) codex_native_package="codex-darwin-x64" ;;
@@ -278,18 +335,33 @@ if [[ "$ENABLED_PROVIDERS" == *codex* ]]; then
     win32-x64) codex_native_package="codex-win32-x64" ;;
     win32-arm64) codex_native_package="codex-win32-arm64" ;;
   esac
-  if [[ -f "$INSTALL_ROOT/package-lock.json" ]] \
-    && cmp -s "$STAGE_ROOT/package-lock.json" "$INSTALL_ROOT/package-lock.json" \
-    && [[ -f "$INSTALL_ROOT/node_modules/@openai/codex-sdk/dist/index.js" ]] \
-    && [[ -x "$INSTALL_ROOT/node_modules/.bin/codex" ]] \
-    && [[ -n "$codex_native_package" ]] \
-    && [[ -d "$INSTALL_ROOT/node_modules/@openai/$codex_native_package" ]]; then
-    printf '[3/6] Reusing the already verified pinned Codex runtime\n'
+  # Each enabled SDK must already be present before an existing node_modules
+  # can be reused; a matching lock alone does not prove both were installed.
+  reusable=1
+  if [[ ! -f "$INSTALL_ROOT/package-lock.json" ]] || ! cmp -s "$STAGE_ROOT/package-lock.json" "$INSTALL_ROOT/package-lock.json"; then
+    reusable=0
+  fi
+  if [[ "$reusable" == "1" && "$needs_codex" == "1" ]]; then
+    if [[ ! -f "$INSTALL_ROOT/node_modules/@openai/codex-sdk/dist/index.js" ]] \
+      || [[ ! -x "$INSTALL_ROOT/node_modules/.bin/codex" ]] \
+      || [[ -z "$codex_native_package" ]] \
+      || [[ ! -d "$INSTALL_ROOT/node_modules/@openai/$codex_native_package" ]]; then
+      reusable=0
+    fi
+  fi
+  if [[ "$reusable" == "1" && "$needs_claude" == "1" ]]; then
+    if [[ ! -f "$INSTALL_ROOT/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs" ]] \
+      || [[ ! -d "$INSTALL_ROOT/node_modules/@anthropic-ai/claude-agent-sdk-$platform_slug" ]]; then
+      reusable=0
+    fi
+  fi
+  if [[ "$reusable" == "1" ]]; then
+    printf '[3/6] Reusing the already verified pinned provider runtimes\n'
     cp -a "$INSTALL_ROOT/node_modules" "$STAGE_ROOT/node_modules"
     dependencies_reused=1
   fi
   if [[ "$dependencies_reused" == "0" ]]; then
-    printf '[3/6] Downloading the pinned Codex runtime (first install only)\n'
+    printf '[3/6] Downloading the pinned provider runtimes (first install only)\n'
     (cd "$STAGE_ROOT" && npm ci \
       --omit=dev \
       --ignore-scripts \
@@ -299,6 +371,12 @@ if [[ "$ENABLED_PROVIDERS" == *codex* ]]; then
       --fetch-retry-mintimeout=1000 \
       --fetch-retry-maxtimeout=10000 \
       --fetch-timeout=30000)
+  fi
+  if [[ "$needs_claude" == "1" && ! -f "$STAGE_ROOT/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs" ]]; then
+    fail_install "MISSING_CLAUDE_SDK" "the pinned Claude Agent SDK did not install"
+  fi
+  if [[ "$needs_codex" == "1" && ! -f "$STAGE_ROOT/node_modules/@openai/codex-sdk/dist/index.js" ]]; then
+    fail_install "MISSING_CODEX_SDK" "the pinned Codex SDK did not install"
   fi
 else
   printf '[3/6] OpenRouter-only setup needs no dependency download\n'
