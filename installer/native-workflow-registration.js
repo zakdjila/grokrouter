@@ -114,10 +114,41 @@
     });
   }
 
+  function rosterAgents(app) {
+    return (app.roster.snapshots.get()?.agents?.rows || [])
+      .filter((agent) => typeof agent?.id === "string" && agent.id.length > 0);
+  }
+
+  async function waitForRosterAgents(app) {
+    // Grok hydrates the roster after the selected Bot id is restored. On a
+    // cold launch the first snapshot is routinely empty for a few seconds, so
+    // an empty roster is startup timing until the deadline passes.
+    const deadline = Date.now() + 20_000;
+    let agents = rosterAgents(app);
+    if (agents.length > 0) return agents;
+    let notify = () => {};
+    const unsubscribe = typeof app.roster.snapshots.subscribe === "function"
+      ? app.roster.snapshots.subscribe(() => notify())
+      : () => {};
+    try {
+      while (Date.now() < deadline) {
+        await Promise.race([
+          new Promise((resolve) => { notify = resolve; }),
+          delay(250),
+        ]);
+        agents = rosterAgents(app);
+        if (agents.length > 0) return agents;
+      }
+    } finally {
+      notify = () => {};
+      unsubscribe();
+    }
+    return agents;
+  }
+
   const app = await waitForAppContext();
   const selectedAgentId = await waitForSelectedAgentId(app);
-  const agents = (app.roster.snapshots.get()?.agents?.rows || [])
-    .filter((agent) => typeof agent?.id === "string" && agent.id.length > 0);
+  const agents = await waitForRosterAgents(app);
   if (agents.length === 0) throw new Error("Grok Bot has no Bots or channels to register");
 
   // Grok Bot 0.30.0 exposes workflows through an agent-scoped API, but the
