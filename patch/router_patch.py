@@ -34,7 +34,9 @@ LEGACY_BACKUPS = (
 DEFAULT_MANIFEST = Path(__file__).with_name("manifests") / "0.30.0.json"
 # Another public router also rewrites the same host. Its marker must never be
 # mistaken for a stock host, so structural verification refuses it outright.
-FOREIGN_MARKER = re.compile(r"opengrok|open_grok", re.IGNORECASE)
+# Cursor's own host names an RPC "OpenGrokBotUserComputerRequest"; only a
+# bare OpenGrok/open_grok mention marks a foreign router.
+FOREIGN_MARKER = re.compile(r"opengrok(?!bot)|open_grok", re.IGNORECASE)
 TRUST_EXACT = "exact-allowlist"
 TRUST_CACHE_SUFFIX = ".grokrouter-trust.json"
 
